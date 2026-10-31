@@ -1,30 +1,38 @@
 package com.temporalfpt.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -42,8 +50,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.util.concurrent.Executors
@@ -261,6 +275,7 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     DisposableEffect(session) {
         onDispose { session.release() }
     }
+    var about by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf<Uri?>(null) }
     var sourceName by remember { mutableStateOf("Няма избран клип") }
     var mode by remember { mutableIntStateOf(0) }
@@ -269,13 +284,10 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     var high by remember { mutableFloatStateOf(3f) }
     var gain by remember { mutableFloatStateOf(3f) }
     var busy by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0f) }
     var status by remember { mutableStateOf("До 480 px и 10 секунди. Звукът не се пренася.") }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var frames by remember { mutableIntStateOf(0) }
     var frameIndex by remember { mutableIntStateOf(0) }
-    var resultW by remember { mutableIntStateOf(1) }
-    var resultH by remember { mutableIntStateOf(1) }
 
     val openVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
@@ -285,142 +297,245 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Bg)
-            .verticalScroll(rememberScrollState())
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("TEMPORAL", color = Accent, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text("FFT", color = Color.White, fontSize = 22.sp, modifier = Modifier.padding(bottom = 4.dp))
-        Text(sourceName, color = Muted, fontSize = 13.sp)
+    val scroll = rememberScrollState()
+    Column(modifier = Modifier.fillMaxSize().background(Bg)) {
+        Column(modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Temporal FFT", color = Accent, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(
+                    "by Dr. Baysinger",
+                    color = Muted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    modifier = Modifier.clickable { about = true },
+                )
+            }
+            Text(
+                "бързи   ·   бавни   ·   лента   ·   спектър",
+                color = Muted,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            )
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(if (resultW > 0 && resultH > 0) resultW / resultH.toFloat() else 16f / 9f)
-                .background(Color(0xFF070807)),
+                .weight(1f)
+                .background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
             val image = preview
             if (image != null && !image.isRecycled) {
                 Image(
                     bitmap = image.asImageBitmap(),
-                    contentDescription = null,
+                    contentDescription = "Резултат",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
                 )
             } else {
-                Text("Резултатът се показва тук", color = Muted, fontSize = 14.sp)
+                Text(
+                    "Отвори клип\nРезултатът остава тук",
+                    color = Muted,
+                    textAlign = TextAlign.Center,
+                )
             }
         }
-        if (frames > 1) {
-            Slider(
-                value = frameIndex.toFloat(),
-                onValueChange = {
-                    val next = it.roundToInt().coerceIn(0, frames - 1)
-                    frameIndex = next
-                    preview = session.bitmap(next)
-                },
-                valueRange = 0f..(frames - 1).toFloat(),
-            )
-            Text("Кадър ${frameIndex + 1} / $frames", color = Muted, fontSize = 12.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            modes.forEach { (id, label) ->
-                val selected = mode == id
-                Button(
-                    onClick = { if (!busy) mode = id },
-                    enabled = !busy,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (selected) Accent else Panel,
-                        contentColor = if (selected) Ink else Color.White,
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = ButtonDefaults.ContentPadding,
-                ) {
-                    Text(label, fontSize = 13.sp)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(scroll)
+                .padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (frames > 1) {
+                Slider(
+                    value = frameIndex.toFloat(),
+                    onValueChange = {
+                        val next = it.roundToInt().coerceIn(0, frames - 1)
+                        frameIndex = next
+                        preview = session.bitmap(next)
+                    },
+                    valueRange = 0f..(frames - 1).toFloat(),
+                    modifier = Modifier.padding(horizontal = sliderSideInset()),
+                )
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ActionButton("Отвори", Accent, Ink, !busy, Modifier.weight(1f)) {
+                    openVideo.launch("video/*")
                 }
-            }
-        }
-        if (mode == 0 || mode == 1) {
-            SliderRow("Граница", cutoff, 0.2f, 12f) { cutoff = it }
-            Text("${"%.1f".format(cutoff)} Hz", color = Color.White, fontSize = 13.sp)
-        }
-        if (mode == 2) {
-            SliderRow("Долна", low, 0.1f, 12f) { low = it.coerceAtMost(high) }
-            Text("${"%.1f".format(low)} Hz", color = Color.White, fontSize = 13.sp)
-            SliderRow("Горна", high, 0.2f, 16f) { high = it.coerceAtLeast(low) }
-            Text("${"%.1f".format(high)} Hz", color = Color.White, fontSize = 13.sp)
-        }
-        if (mode == 0 || mode == 2) {
-            SliderRow("Усилване", gain, 0.5f, 8f) { gain = it }
-            Text("${"%.1f".format(gain)}×", color = Color.White, fontSize = 13.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { openVideo.launch("video/*") },
-                enabled = !busy,
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink),
-                shape = RoundedCornerShape(8.dp),
-            ) { Text("Отвори клип") }
-            Button(
-                onClick = {
-                    val uri = source ?: return@Button
+                ActionButton("Обработи", Panel, Color.White, !busy && source != null, Modifier.weight(1f)) {
+                    val uri = source ?: return@ActionButton
                     busy = true
                     onBusy(true)
-                    progress = 0f
                     frames = 0
                     frameIndex = 0
                     preview = null
                     status = "Чете клипа…"
                     session.start(uri, mode, cutoff, low, high, gain, { fraction ->
-                        progress = fraction
                         status = "Обработка ${(fraction * 100).roundToInt()}%"
-                    }, { count, w, h ->
+                    }, { count, _, _ ->
                         frames = count
-                        resultW = w
-                        resultH = h
                         frameIndex = 0
                         preview = session.bitmap(0)
                         status = "Записва видеото…"
                     }, { message ->
                         busy = false
                         onBusy(false)
-                        progress = 1f
                         status = message
                     }, { message ->
                         busy = false
                         onBusy(false)
                         status = message
                     })
-                },
-                enabled = !busy && source != null,
-                colors = ButtonDefaults.buttonColors(containerColor = Panel, contentColor = Color.White),
-                shape = RoundedCornerShape(8.dp),
-            ) { Text("Обработи") }
-            if (busy) {
-                Button(
-                    onClick = { session.cancel = true },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4D3A), contentColor = Color.White),
-                    shape = RoundedCornerShape(8.dp),
-                ) { Text("Отказ") }
+                }
+                ActionButton("Отказ", Color(0xFFFF4D3A), Color.White, busy, Modifier.weight(1f)) {
+                    session.cancel = true
+                }
             }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                modes.forEach { (id, label) ->
+                    val selected = mode == id
+                    ActionButton(
+                        label,
+                        if (selected) Accent else Panel,
+                        if (selected) Ink else Color.White,
+                        !busy,
+                        Modifier.weight(1f),
+                    ) { mode = id }
+                }
+            }
+            if (mode == 0 || mode == 1) {
+                LabeledSlider("Граница", cutoff, 0.2f..12f, "${"%.1f".format(cutoff)} Hz") { cutoff = it }
+            }
+            if (mode == 2) {
+                LabeledSlider("Долна", low, 0.1f..12f, "${"%.1f".format(low)} Hz") { low = it.coerceAtMost(high) }
+                LabeledSlider("Горна", high, 0.2f..16f, "${"%.1f".format(high)} Hz") { high = it.coerceAtLeast(low) }
+            }
+            if (mode == 0 || mode == 2) {
+                LabeledSlider("Усилване", gain, 0.5f..8f, "${"%.1f".format(gain)}×") { gain = it }
+            }
+            Text(if (source == null) status else "$sourceName    $status", color = Muted, fontSize = 12.sp)
         }
-        Text(status, color = Muted, fontSize = 13.sp)
+        if (about) {
+            AboutDialog { about = false }
+        }
     }
 }
 
 @Composable
-private fun SliderRow(label: String, value: Float, start: Float, end: Float, onChange: (Float) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Muted, modifier = Modifier.padding(end = 8.dp), fontSize = 14.sp)
-        Slider(
-            value = value,
-            onValueChange = onChange,
-            valueRange = start..end,
+private fun ActionButton(
+    text: String,
+    background: Color,
+    foreground: Color,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(30.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = background,
+            contentColor = foreground,
+            disabledContainerColor = Panel,
+            disabledContentColor = Muted,
+        ),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Text(text, fontSize = 13.sp, maxLines = 1, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+private fun LabeledSlider(
+    title: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    caption: String,
+    onChange: (Float) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(title, color = Muted)
+            Text(caption, color = Color.White, fontSize = 13.sp, textAlign = TextAlign.End)
+        }
+        Slider(
+            value = value.coerceIn(range.start, range.endInclusive),
+            onValueChange = onChange,
+            valueRange = range,
+            modifier = Modifier
+                .padding(horizontal = sliderSideInset())
+                .pullUp(10.dp),
         )
+    }
+}
+
+@Composable
+private fun sliderSideInset(): Dp {
+    val prefix = rememberTextMeasurer().measure(text = "Из", style = LocalTextStyle.current).size.width
+    return with(LocalDensity.current) { prefix.toDp() }
+}
+
+private const val ABOUT_EN = "Donate to Dr. Baysinger. He promises to spend it on hookers and beer."
+private const val ABOUT_BG = "Дарете на Dr. Baysinger. Той обещава да ги изхарчи за курви и бело."
+private const val REVOLUT = "revolut.me/georgi09qc"
+private val BTC = listOf(
+    "bc1qr84akpfry7sjs6759wwq722fyert9apcarpst6",
+    "bc1p6hp5q20u9t9upsjt7425wgqdrs0cr8wnnlf9atu24z92pzsnq85q62uc8e",
+)
+
+@Composable
+private fun AboutDialog(onClose: () -> Unit) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = {
+            TextButton(onClick = onClose) { Text("OK", color = Accent) }
+        },
+        title = { Text("About", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(ABOUT_EN)
+                Text(ABOUT_BG, modifier = Modifier.padding(top = 12.dp))
+                Text("Revolut", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 20.dp))
+                CopyLine(REVOLUT, context)
+                Text("BTC address", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 16.dp))
+                BTC.forEach { CopyLine(it, context) }
+            }
+        },
+    )
+}
+
+@Composable
+private fun CopyLine(value: String, context: Context) {
+    Text(
+        value,
+        color = Accent,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("address", value))
+                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+            }
+            .padding(vertical = 6.dp),
+    )
+}
+
+private fun Modifier.pullUp(by: Dp): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints)
+    val lift = by.roundToPx().coerceAtMost(placeable.height)
+    layout(placeable.width, placeable.height - lift) {
+        placeable.place(0, -lift)
     }
 }

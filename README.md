@@ -6,7 +6,7 @@
 
 ## Телефон
 
-Свали **Temporal-FFT-1.0.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
+Свали **Temporal-FFT-1.2.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
 
 Кодът за телефона е в папката `android`.
 
@@ -41,7 +41,7 @@ C:\Python314\python.exe temporal_app.py
 - **Лента** — оставя честотите между долната и горната граница
 - **Спектър** — кадрите са честоти: първите са бавни, последните са бързи
 
-По подразбиране ширината е 480 px и клипът е до 10 секунди. Отметките **Оригинален размер** и **Цял клип** махат тези граници. Звукът не се пренася.
+По подразбиране ширината е 480 px и клипът е до 10 секунди. Отметките **Оригинал** и **Цял клип** махат тези граници. Звукът не се пренася.
 
 ---
 
@@ -53,7 +53,7 @@ There is a phone app and a Windows app. The clip and the save location are chose
 
 ## Phone
 
-Download **Temporal-FFT-1.0.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
+Download **Temporal-FFT-1.2.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
 
 The phone source is in the `android` folder.
 

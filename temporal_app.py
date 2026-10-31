@@ -26,6 +26,14 @@ ACCENT = "#d6f25c"
 DARK = "#16180f"
 TROUGH = "#2c312b"
 RED = "#ff4d3a"
+LINE = "#31362f"
+ABOUT_EN = "Donate to Dr. Baysinger. He promises to spend it on hookers and beer."
+ABOUT_BG = "Дарете на Dr. Baysinger. Той обещава да ги изхарчи за курви и бело."
+REVOLUT = "revolut.me/georgi09qc"
+BTC = (
+    "bc1qr84akpfry7sjs6759wwq722fyert9apcarpst6",
+    "bc1p6hp5q20u9t9upsjt7425wgqdrs0cr8wnnlf9atu24z92pzsnq85q62uc8e",
+)
 
 MODES = (
     ("Бързи", "highpass"),
@@ -70,6 +78,53 @@ def fit_display(image: np.ndarray, box_w: int, box_h: int) -> np.ndarray:
     return cv2.resize(image, (new_w, new_h), interpolation=interp)
 
 
+def show_about(root: tk.Tk) -> None:
+    window = tk.Toplevel(root)
+    window.title("About")
+    window.configure(bg=BG)
+    window.resizable(False, False)
+    window.transient(root)
+    frame = tk.Frame(window, bg=BG, padx=18, pady=16)
+    frame.pack(fill="both", expand=True)
+    tk.Label(frame, text="About", bg=BG, fg=TEXT, font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x")
+    tk.Label(
+        frame, text=ABOUT_EN, bg=BG, fg=TEXT, font=("Segoe UI", 11), wraplength=640, justify="left", anchor="w"
+    ).pack(fill="x", pady=(16, 8))
+    tk.Label(
+        frame, text=ABOUT_BG, bg=BG, fg=TEXT, font=("Segoe UI", 11), wraplength=640, justify="left", anchor="w"
+    ).pack(fill="x")
+    tk.Frame(frame, bg=LINE, height=1).pack(fill="x", pady=14)
+    tk.Label(frame, text="Revolut", bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold"), anchor="w").pack(fill="x")
+    note = tk.Label(frame, text="", bg=BG, fg=ACCENT, font=("Segoe UI", 9), anchor="w")
+
+    def copy(value: str) -> None:
+        root.clipboard_clear()
+        root.clipboard_append(value)
+        note.configure(text="Copied")
+
+    def link(value: str) -> None:
+        label = tk.Label(
+            frame, text=value, bg=BG, fg=ACCENT, font=("Segoe UI", 10), cursor="hand2", anchor="w", justify="left"
+        )
+        label.pack(fill="x", pady=(6, 0))
+        label.bind("<Button-1>", lambda _event: copy(value))
+
+    link(REVOLUT)
+    tk.Label(frame, text="BTC address", bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold"), anchor="w").pack(
+        fill="x", pady=(16, 0)
+    )
+    for address in BTC:
+        link(address)
+    note.pack(fill="x", pady=(14, 0))
+    window.update_idletasks()
+    width, height = 700, window.winfo_reqheight()
+    parent_x = root.winfo_rootx() + max(0, (root.winfo_width() - width) // 2)
+    parent_y = root.winfo_rooty() + max(0, (root.winfo_height() - height) // 2)
+    window.geometry(f"{width}x{height}+{parent_x}+{parent_y}")
+    window.grab_set()
+    window.focus_set()
+
+
 class TemporalApp:
     def __init__(self, visible: bool = True) -> None:
         enable_dpi_awareness()
@@ -77,7 +132,7 @@ class TemporalApp:
         self.root.withdraw()
         self.root.title("Temporal FFT")
         self.root.configure(bg=BG)
-        self.root.minsize(860, 680)
+        self.root.minsize(920, 700)
         try:
             ppi = float(self.root.winfo_fpixels("1i"))
             if ppi > 1:
@@ -103,7 +158,7 @@ class TemporalApp:
             self.root.lift()
 
     def _place_window(self) -> None:
-        width, height = 1040, 760
+        width, height = 1180, 780
         self.root.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -117,23 +172,46 @@ class TemporalApp:
 
         header = tk.Frame(self.root, bg=BG)
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 0))
-        tk.Label(header, text="TEMPORAL", bg=BG, fg=ACCENT, font=("Segoe UI", 18, "bold")).pack(side="left")
-        tk.Label(header, text="  FFT", bg=BG, fg=TEXT, font=("Segoe UI", 18)).pack(side="left")
+        title_box = tk.Frame(header, bg=BG)
+        title_box.pack(side="left", anchor="w")
+        tk.Label(title_box, text="TEMPORAL", bg=BG, fg=ACCENT, font=("Segoe UI", 18, "bold")).pack(side="left")
+        tk.Label(title_box, text="  FFT", bg=BG, fg=TEXT, font=("Segoe UI", 18)).pack(side="left")
         tk.Label(
             header,
-            text="честоти по времето на всеки пиксел",
+            text="бързи    ·    бавни    ·    лента    ·    спектър",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 9),
         ).pack(side="left", padx=(16, 0), pady=(8, 0))
+        credit = tk.Label(
+            header,
+            text="by Dr. Baysinger",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 9),
+            cursor="hand2",
+        )
+        credit.pack(side="right")
+        credit.bind("<Button-1>", lambda _event: show_about(self.root))
+
+        rule = tk.Frame(self.root, bg=ACCENT, height=2)
+        rule.grid(row=2, column=0, sticky="ew", padx=18, pady=(8, 0))
+        rule.grid_propagate(False)
 
         self.preview = tk.Frame(self.root, bg="#070807")
-        self.preview.grid(row=1, column=0, sticky="nsew", padx=18, pady=(12, 0))
-        self.canvas = tk.Canvas(self.preview, bg="#070807", highlightthickness=0, bd=0, height=280)
+        self.preview.grid(row=1, column=0, sticky="nsew", padx=18, pady=(8, 0))
+        self.canvas = tk.Canvas(
+            self.preview,
+            bg="#070807",
+            highlightthickness=0,
+            bd=0,
+            width=800,
+            height=180,
+        )
         self.canvas.pack(fill="both", expand=True)
         self.placeholder = self.canvas.create_text(
-            400,
-            140,
+            450,
+            210,
             text="Отвори клип\nПосле избери къде да се запише резултатът",
             fill=MUTED,
             font=("Segoe UI", 13),
@@ -142,14 +220,14 @@ class TemporalApp:
         self.canvas.bind("<Configure>", lambda _e: self._draw())
 
         self.seek_row = tk.Frame(self.root, bg=BG)
-        self.seek_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(8, 0))
+        self.seek_row.grid(row=3, column=0, sticky="ew", padx=18, pady=(8, 0))
         self.seek_var = tk.IntVar(value=0)
         self.seek = self._scale(self.seek_row, self.seek_var, 0, 1, self._on_seek, TROUGH)
         self.seek.pack(fill="x")
         self.seek_row.grid_remove()
 
         buttons = tk.Frame(self.root, bg=BG)
-        buttons.grid(row=3, column=0, sticky="ew", padx=18, pady=(12, 0))
+        buttons.grid(row=4, column=0, sticky="ew", padx=18, pady=(10, 0))
         self.open_btn = self._button(buttons, "Отвори клип", self._on_open, primary=True)
         self.run_btn = self._button(buttons, "Обработи", self._on_run)
         self.cancel_btn = self._button(buttons, "Отказ", self._on_cancel)
@@ -158,14 +236,17 @@ class TemporalApp:
         self.run_btn.configure(state="disabled")
 
         modes = tk.Frame(self.root, bg=BG)
-        modes.grid(row=4, column=0, sticky="ew", padx=18, pady=(12, 0))
-        self._caption(modes, "Режим").pack(side="left")
+        modes.grid(row=5, column=0, sticky="ew", padx=18, pady=(8, 0))
         self.mode_var = tk.StringVar(value="highpass")
         self.mode_buttons = {}
         for label, key in MODES:
             button = self._button(modes, label, lambda key=key: self._set_mode(key))
             button.pack(side="left", padx=(0, 8))
             self.mode_buttons[key] = button
+        self.size_btn = self._button(modes, "Оригинал", self._toggle_size)
+        self.clip_btn = self._button(modes, "Цял клип", self._toggle_clip)
+        self.size_btn.pack(side="left", padx=(16, 8))
+        self.clip_btn.pack(side="left")
 
         self.cutoff_var = tk.DoubleVar(value=2.0)
         self.cutoff_row, self.cutoff_value = self._slider_row("Граница", self.cutoff_var, 0.2, 12, 0.1, "Hz")
@@ -179,47 +260,22 @@ class TemporalApp:
         self.width_row, self.width_value = self._slider_row("Ширина", self.width_var, 320, 1920, 16, "px")
         self.seconds_var = tk.IntVar(value=10)
         self.seconds_row, self.seconds_value = self._slider_row("Дължина", self.seconds_var, 1, 60, 1, "сек")
-
-        checks = tk.Frame(self.root, bg=BG)
-        checks.grid(row=11, column=0, sticky="ew", padx=18, pady=(8, 0))
         self.full_size = tk.BooleanVar(value=False)
         self.full_clip = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            checks,
-            text="Оригинален размер",
-            variable=self.full_size,
-            command=self._refresh_limits,
-            bg=BG,
-            fg=TEXT,
-            selectcolor=RAISED,
-            activebackground=BG,
-            activeforeground=TEXT,
-            font=("Segoe UI", 10),
-        ).pack(side="left", padx=(0, 16))
-        tk.Checkbutton(
-            checks,
-            text="Цял клип",
-            variable=self.full_clip,
-            command=self._refresh_limits,
-            bg=BG,
-            fg=TEXT,
-            selectcolor=RAISED,
-            activebackground=BG,
-            activeforeground=TEXT,
-            font=("Segoe UI", 10),
-        ).pack(side="left")
 
         status = tk.Frame(self.root, bg=BG)
-        status.grid(row=12, column=0, sticky="ew", padx=18, pady=(10, 14))
-        self.status = tk.Label(
+        status.grid(row=13, column=0, sticky="ew", padx=18, pady=(8, 14))
+        self.detail = tk.Label(
             status,
-            text="Избери клип. Резултатът се записва където посочиш.",
+            text="Отвори клип. Резултатът се записва където посочиш.",
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 9),
             anchor="w",
         )
-        self.status.pack(fill="x")
+        self.detail.pack(side="left", fill="x", expand=True)
+        self.message = tk.Label(status, text="", bg=BG, fg=MUTED, font=("Segoe UI", 9), anchor="e")
+        self.message.pack(side="right")
 
     def _caption(self, parent: tk.Misc, text: str) -> tk.Label:
         return tk.Label(parent, text=text, bg=BG, fg=MUTED, font=("Segoe UI", 10), width=16, anchor="w")
@@ -274,14 +330,41 @@ class TemporalApp:
         self._caption(row, label).pack(side="left")
         scale = self._scale(row, variable, start, end, lambda _v: self._refresh_limits(), TROUGH, resolution)
         scale.pack(side="left", fill="x", expand=True, padx=12)
-        value = tk.Label(row, text="", bg=BG, fg=TEXT, font=("Segoe UI", 10), width=16, anchor="e")
+        value = tk.Label(row, text="", bg=BG, fg=TEXT, font=("Segoe UI", 10), width=28, anchor="e")
         value.pack(side="right")
         return row, value
 
     def _next_row(self) -> int:
-        row = getattr(self, "_row", 4) + 1
+        row = getattr(self, "_row", 5) + 1
         self._row = row
         return row
+
+    def _paint(self, button: tk.Button, bg: str, fg: str, text: str) -> None:
+        button.configure(text=text, bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
+
+    def _toggle_size(self) -> None:
+        if self.busy:
+            return
+        self.full_size.set(not self.full_size.get())
+        self._paint_toggles()
+        self._refresh_limits()
+
+    def _toggle_clip(self) -> None:
+        if self.busy:
+            return
+        self.full_clip.set(not self.full_clip.get())
+        self._paint_toggles()
+        self._refresh_limits()
+
+    def _paint_toggles(self) -> None:
+        if self.full_size.get():
+            self._paint(self.size_btn, ACCENT, DARK, "Оригинал ВКЛ")
+        else:
+            self._paint(self.size_btn, RAISED, TEXT, "Оригинал")
+        if self.full_clip.get():
+            self._paint(self.clip_btn, ACCENT, DARK, "Цял клип ВКЛ")
+        else:
+            self._paint(self.clip_btn, RAISED, TEXT, "Цял клип")
 
     def _set_mode(self, key: str) -> None:
         if self.busy:
@@ -303,6 +386,7 @@ class TemporalApp:
         self._show(self.low_row, show_band)
         self._show(self.high_row, show_band)
         self._show(self.gain_row, show_gain)
+        self._paint_toggles()
         self._refresh_limits()
 
     def _show(self, row: tk.Frame, visible: bool) -> None:
@@ -362,7 +446,8 @@ class TemporalApp:
             bits.append(f"{fps:.2f} кадъра/сек")
         if seconds:
             bits.append(f"{seconds:.1f} сек")
-        self.status.configure(text="    ".join(bits), fg=MUTED)
+        self.detail.configure(text="    ".join(bits))
+        self.message.configure(text="", fg=MUTED)
         self.run_btn.configure(state="normal")
 
     def _on_seek(self, _value=None) -> None:
@@ -428,7 +513,7 @@ class TemporalApp:
         self.open_btn.configure(state="disabled")
         if not self.cancel_btn.winfo_ismapped():
             self.cancel_btn.pack(side="left")
-        self.status.configure(text="Чете клипа…", fg=MUTED)
+        self.message.configure(text="Чете клипа…", fg=MUTED)
         threading.Thread(
             target=self._work,
             args=(self.path, dest, mode, cutoff, low, high, gain, max_width, max_seconds),
@@ -467,14 +552,14 @@ class TemporalApp:
             self.root.after(0, lambda text=text: self._finish(text, error=text != "Спряно."))
 
     def _status(self, text: str) -> None:
-        self.root.after(0, lambda: self.status.configure(text=text, fg=MUTED))
+        self.root.after(0, lambda: self.message.configure(text=text, fg=MUTED))
 
     def _finish(self, text: str, error: bool = False) -> None:
         self.busy = False
         self.cancel_btn.pack_forget()
         self.open_btn.configure(state="normal")
         self.run_btn.configure(state="normal" if self.path else "disabled")
-        self.status.configure(text=text, fg=RED if error else ACCENT)
+        self.message.configure(text=text, fg=RED if error else ACCENT)
         if error and text != "Спряно.":
             messagebox.showerror("Temporal FFT", text)
         if self.frames is not None and not error:
