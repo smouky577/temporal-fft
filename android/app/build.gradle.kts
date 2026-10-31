@@ -12,8 +12,8 @@ android {
         applicationId = "com.temporalfpt.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 5
+        versionName = "1.4"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }

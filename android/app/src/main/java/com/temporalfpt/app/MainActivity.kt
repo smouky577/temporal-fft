@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -60,6 +61,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import java.util.concurrent.Executors
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -149,7 +151,9 @@ class FftSession(private val context: android.content.Context) {
                             } else if (frame.width != frameW || frame.height != frameH) {
                                 frame = fitFrame(frame, frameW, frameH)
                             }
-                            NativeFilter.push(handle, frame.pixels)
+                            if (!NativeFilter.push(handle, frame.pixels)) {
+                                error("Няма достатъчно памет за този клип.")
+                            }
                             stored++
                             val fraction = 0.2f * stored / maxFrames
                             main.post { onProgress(fraction) }
@@ -288,12 +292,30 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var frames by remember { mutableIntStateOf(0) }
     var frameIndex by remember { mutableIntStateOf(0) }
+    var clipFps by remember { mutableFloatStateOf(30f) }
+    var playing by remember { mutableStateOf(false) }
+
+    fun showFrame(index: Int) {
+        val safe = index.coerceIn(0, (frames - 1).coerceAtLeast(0))
+        val next = session.bitmap(safe) ?: return
+        frameIndex = safe
+        preview = next
+    }
 
     val openVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             source = uri
             sourceName = uri.lastPathSegment ?: "Клип"
             status = "Клипът е избран."
+        }
+    }
+
+    LaunchedEffect(playing, frames, clipFps) {
+        if (!playing || frames < 2) return@LaunchedEffect
+        val frameDelay = (1000f / clipFps.coerceIn(1f, 60f)).toLong().coerceAtLeast(16L)
+        while (playing) {
+            delay(frameDelay)
+            showFrame(if (frameIndex >= frames - 1) 0 else frameIndex + 1)
         }
     }
 
@@ -344,6 +366,31 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                 )
             }
         }
+        if (frames > 0) {
+            Column(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 6.dp, end = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(clock(frameIndex, clipFps), color = Muted, fontSize = 12.sp)
+                    Slider(
+                        value = frameIndex.toFloat(),
+                        onValueChange = { showFrame(it.roundToInt()) },
+                        valueRange = 0f..(frames - 1).coerceAtLeast(0).toFloat(),
+                        enabled = frames > 1 && !busy,
+                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    )
+                    Text(clock(frames, clipFps), color = Muted, fontSize = 12.sp)
+                }
+                ActionButton(
+                    if (playing) "Спри" else "Пусни",
+                    if (playing) Accent else Panel,
+                    if (playing) Ink else Color.White,
+                    frames > 1 && !busy,
+                    Modifier.fillMaxWidth(),
+                ) { playing = !playing }
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -351,18 +398,6 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                 .padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (frames > 1) {
-                Slider(
-                    value = frameIndex.toFloat(),
-                    onValueChange = {
-                        val next = it.roundToInt().coerceIn(0, frames - 1)
-                        frameIndex = next
-                        preview = session.bitmap(next)
-                    },
-                    valueRange = 0f..(frames - 1).toFloat(),
-                    modifier = Modifier.padding(horizontal = sliderSideInset()),
-                )
-            }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ActionButton("Отвори", Accent, Ink, !busy, Modifier.weight(1f)) {
                     openVideo.launch("video/*")
@@ -373,14 +408,16 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                     onBusy(true)
                     frames = 0
                     frameIndex = 0
+                    playing = false
                     preview = null
                     status = "Чете клипа…"
                     session.start(uri, mode, cutoff, low, high, gain, { fraction ->
                         status = "Обработка ${(fraction * 100).roundToInt()}%"
                     }, { count, _, _ ->
                         frames = count
-                        frameIndex = 0
-                        preview = session.bitmap(0)
+                        clipFps = session.fps
+                        playing = false
+                        showFrame(0)
                         status = "Записва видеото…"
                     }, { message ->
                         busy = false
@@ -484,6 +521,11 @@ private fun LabeledSlider(
 private fun sliderSideInset(): Dp {
     val prefix = rememberTextMeasurer().measure(text = "Из", style = LocalTextStyle.current).size.width
     return with(LocalDensity.current) { prefix.toDp() }
+}
+
+private fun clock(frame: Int, fps: Float): String {
+    val total = (frame / fps.coerceAtLeast(1f)).toInt().coerceAtLeast(0)
+    return "%d:%02d".format(total / 60, total % 60)
 }
 
 private const val ABOUT_EN = "Donate to Dr. Baysinger. He promises to spend it on hookers and beer."

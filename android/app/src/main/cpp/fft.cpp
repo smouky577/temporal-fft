@@ -138,6 +138,7 @@ struct Scratch {
     double* im_b = nullptr;
     double* time = nullptr;
     float* ch[3] = {nullptr, nullptr, nullptr};
+    float* series = nullptr;
     int* hist = nullptr;
 
     bool alloc(const Plan& plan, bool with_hist) {
@@ -148,9 +149,10 @@ struct Scratch {
         re_b = (double*)std::calloc(plan.bins, sizeof(double));
         im_b = (double*)std::calloc(plan.bins, sizeof(double));
         time = (double*)std::calloc(plan.n, sizeof(double));
+        series = (float*)std::calloc(plan.n, sizeof(float));
         for (int c = 0; c < 3; c++) ch[c] = (float*)std::calloc(plan.n, sizeof(float));
         if (with_hist) hist = (int*)std::calloc(4096, sizeof(int));
-        return a_re && a_im && full_re && full_im && re_b && im_b && time && ch[0] && ch[1] && ch[2] &&
+        return a_re && a_im && full_re && full_im && re_b && im_b && time && series && ch[0] && ch[1] && ch[2] &&
                (!with_hist || hist);
     }
 
@@ -162,12 +164,14 @@ struct Scratch {
         std::free(re_b);
         std::free(im_b);
         std::free(time);
+        std::free(series);
         for (float*& p : ch) {
             std::free(p);
             p = nullptr;
         }
         std::free(hist);
         a_re = a_im = full_re = full_im = re_b = im_b = time = nullptr;
+        series = nullptr;
         hist = nullptr;
     }
 
@@ -378,33 +382,67 @@ namespace {
 struct Clip {
     int w = 0;
     int h = 0;
+    int limit = 0;
     int capacity = 0;
     int count = 0;
     int out_frames = 0;
-    float* samples = nullptr;
+    uint8_t* samples = nullptr;
     uint32_t* out = nullptr;
     float* mags = nullptr;
 };
 
-int sample_index(const Clip& clip, int channel, int y, int x) {
-    return ((channel * clip.h + y) * clip.w + x) * clip.capacity;
+size_t frame_bytes(const Clip& clip) {
+    return (size_t)clip.w * (size_t)clip.h * 3u;
 }
 
-void push_frame(Clip& clip, const int32_t* pixels) {
-    if (clip.count >= clip.capacity) return;
-    int t = clip.count;
-    for (int y = 0; y < clip.h; y++) {
-        for (int x = 0; x < clip.w; x++) {
-            int32_t p = pixels[y * clip.w + x];
-            float r = (float)((p >> 16) & 255);
-            float g = (float)((p >> 8) & 255);
-            float b = (float)(p & 255);
-            clip.samples[sample_index(clip, 0, y, x) + t] = r;
-            clip.samples[sample_index(clip, 1, y, x) + t] = g;
-            clip.samples[sample_index(clip, 2, y, x) + t] = b;
+bool grow_frames(Clip& clip, int needed) {
+    if (needed <= clip.capacity) return true;
+    if (needed > clip.limit) return false;
+    int cap = clip.capacity > 0 ? clip.capacity : 16;
+    while (cap < needed) {
+        if (cap > clip.limit / 2) {
+            cap = clip.limit;
+            break;
         }
+        cap *= 2;
+    }
+    if (cap < needed || cap > clip.limit) return false;
+    size_t bytes = (size_t)cap * frame_bytes(clip);
+    auto* next = (uint8_t*)std::realloc(clip.samples, bytes);
+    if (next == nullptr) return false;
+    clip.samples = next;
+    clip.capacity = cap;
+    return true;
+}
+
+bool push_frame(Clip& clip, const int32_t* pixels) {
+    if (clip.count >= clip.limit) return false;
+    if (!grow_frames(clip, clip.count + 1)) return false;
+    uint8_t* dest = clip.samples + (size_t)clip.count * frame_bytes(clip);
+    int pixels_n = clip.w * clip.h;
+    for (int i = 0; i < pixels_n; i++) {
+        int32_t p = pixels[i];
+        dest[i * 3] = (uint8_t)((p >> 16) & 255);
+        dest[i * 3 + 1] = (uint8_t)((p >> 8) & 255);
+        dest[i * 3 + 2] = (uint8_t)(p & 255);
     }
     clip.count++;
+    return true;
+}
+
+void load_series(const Clip& clip, int channel, int y, int x, int n, float* dest) {
+    size_t stride = frame_bytes(clip);
+    size_t pixel = ((size_t)y * (size_t)clip.w + (size_t)x) * 3u + (size_t)channel;
+    for (int t = 0; t < n; t++) dest[t] = (float)clip.samples[(size_t)t * stride + pixel];
+}
+
+void shrink_samples(Clip& clip) {
+    if (clip.samples == nullptr || clip.capacity <= clip.count) return;
+    size_t bytes = (size_t)clip.count * frame_bytes(clip);
+    auto* next = (uint8_t*)std::realloc(clip.samples, bytes);
+    if (next == nullptr) return;
+    clip.samples = next;
+    clip.capacity = clip.count;
 }
 
 struct Job {
@@ -450,8 +488,8 @@ void color_row(Job& job, int y, Scratch& scratch) {
     const Plan& plan = *job.plan;
     for (int x = 0; x < clip.w; x++) {
         for (int c = 0; c < 3; c++) {
-            const float* series = clip.samples + sample_index(clip, c, y, x);
-            filter_series(plan, scratch, series, job.mode, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[c]);
+            load_series(clip, c, y, x, plan.n, scratch.series);
+            filter_series(plan, scratch, scratch.series, job.mode, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[c]);
         }
         for (int t = 0; t < plan.n; t++) {
             int r = (int)scratch.ch[0][t];
@@ -468,8 +506,8 @@ void mag_row(Job& job, int y, Scratch& scratch) {
     const Plan& plan = *job.plan;
     for (int x = 0; x < clip.w; x++) {
         for (int c = 0; c < 3; c++) {
-            const float* series = clip.samples + sample_index(clip, c, y, x);
-            filter_series(plan, scratch, series, 3, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[0]);
+            load_series(clip, c, y, x, plan.n, scratch.series);
+            filter_series(plan, scratch, scratch.series, 3, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[0]);
             float* dest = clip.mags + (((size_t)c * clip.h + y) * clip.w + x) * plan.bins;
             for (int k = 0; k < plan.bins; k++) {
                 float mag = scratch.ch[0][k];
@@ -576,6 +614,7 @@ float percentile_ref(const int* hist) {
 
 int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode, float cutoff, float low, float high, float gain) {
     if (clip.count < 4) return -3;
+    shrink_samples(clip);
     if (mode < 0 || mode > 3) return -1;
     Plan plan;
     if (!plan.init(clip.count)) return -2;
@@ -625,6 +664,9 @@ int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode,
             return code;
         }
         clip.out_frames = plan.bins;
+        std::free(clip.samples);
+        clip.samples = nullptr;
+        clip.capacity = 0;
         return plan.bins;
     }
     size_t out_n = (size_t)plan.n * clip.w * clip.h;
@@ -637,6 +679,9 @@ int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode,
         return code;
     }
     clip.out_frames = plan.n;
+    std::free(clip.samples);
+    clip.samples = nullptr;
+    clip.capacity = 0;
     return plan.n;
 }
 
@@ -650,27 +695,23 @@ Java_com_temporalfpt_app_NativeFilter_selfTest(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_temporalfpt_app_NativeFilter_create(JNIEnv*, jclass, jint width, jint height, jint capacity) {
     if (width < 2 || height < 2 || capacity < 4 || width > 2000 || height > 2000 || capacity > 2000) return 0;
-    size_t count = (size_t)3 * (size_t)width * (size_t)height * (size_t)capacity;
-    if (count > 500000000ull) return 0;
-    float* samples = (float*)std::malloc(count * sizeof(float));
-    if (!samples) return 0;
     auto* clip = new Clip();
     clip->w = width;
     clip->h = height;
-    clip->capacity = capacity;
-    clip->samples = samples;
+    clip->limit = capacity;
     return (jlong)clip;
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_temporalfpt_app_NativeFilter_push(JNIEnv* env, jclass, jlong handle, jintArray pixels) {
     auto* clip = (Clip*)handle;
-    if (clip == nullptr || pixels == nullptr) return;
-    if (env->GetArrayLength(pixels) < clip->w * clip->h) return;
+    if (clip == nullptr || pixels == nullptr) return JNI_FALSE;
+    if (env->GetArrayLength(pixels) < clip->w * clip->h) return JNI_FALSE;
     jint* data = env->GetIntArrayElements(pixels, nullptr);
-    if (data == nullptr) return;
-    push_frame(*clip, data);
+    if (data == nullptr) return JNI_FALSE;
+    bool ok = push_frame(*clip, data);
     env->ReleaseIntArrayElements(pixels, data, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jint JNICALL

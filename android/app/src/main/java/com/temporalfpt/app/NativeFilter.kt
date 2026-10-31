@@ -13,7 +13,7 @@ object NativeFilter {
 
     @JvmStatic external fun create(width: Int, height: Int, capacity: Int): Long
 
-    @JvmStatic external fun push(handle: Long, pixels: IntArray)
+    @JvmStatic external fun push(handle: Long, pixels: IntArray): Boolean
 
     @JvmStatic external fun process(
         handle: Long,

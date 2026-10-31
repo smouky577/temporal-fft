@@ -6,13 +6,13 @@
 
 ## Телефон
 
-Свали **Temporal-FFT-1.2.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
+Свали **Temporal-FFT-1.4.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
 
 Кодът за телефона е в папката `android`.
 
 ## Windows
 
-Свали **Temporal-FFT-Windows-1.0.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
+Свали **Temporal-FFT-Windows-1.4.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
 
 Не отваряй `temporal_app.py` и `temporal.py` в сайта и не копирай текста в нов файл. Така файловете само се показват, не се свалят.
 
@@ -53,13 +53,13 @@ There is a phone app and a Windows app. The clip and the save location are chose
 
 ## Phone
 
-Download **Temporal-FFT-1.2.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
+Download **Temporal-FFT-1.4.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
 
 The phone source is in the `android` folder.
 
 ## Windows
 
-Download **Temporal-FFT-Windows-1.0.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
+Download **Temporal-FFT-Windows-1.4.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
 
 Do not open `temporal_app.py` or `temporal.py` on the site and do not paste them into a new file. That only shows the text.
 

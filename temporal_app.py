@@ -144,13 +144,21 @@ class TemporalApp:
         self.busy = False
         self.cancel_flag = False
         self.frames: np.ndarray | None = None
+        self.source_count = 0
+        self.play_index = 0
+        self.play_fps = 30.0
+        self.playing = False
+        self.play_after = None
+        self.capture = None
+        self.capture_pos = -1
+        self._seeking = False
         self.photo = None
         self.image_id = None
         self._ready = False
 
         self._build()
         self._place_window()
-        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._ready = True
         self._apply_mode()
         if visible:
@@ -221,9 +229,17 @@ class TemporalApp:
 
         self.seek_row = tk.Frame(self.root, bg=BG)
         self.seek_row.grid(row=3, column=0, sticky="ew", padx=18, pady=(8, 0))
+        times = tk.Frame(self.seek_row, bg=BG)
+        times.pack(fill="x")
+        self.time_now = tk.Label(times, text="0:00", bg=BG, fg=MUTED, font=("Segoe UI", 9), width=6, anchor="w")
+        self.time_now.pack(side="left")
         self.seek_var = tk.IntVar(value=0)
-        self.seek = self._scale(self.seek_row, self.seek_var, 0, 1, self._on_seek, TROUGH)
-        self.seek.pack(fill="x")
+        self.seek = self._scale(times, self.seek_var, 0, 1, self._on_seek, TROUGH)
+        self.seek.pack(side="left", fill="x", expand=True, padx=8)
+        self.time_end = tk.Label(times, text="0:00", bg=BG, fg=MUTED, font=("Segoe UI", 9), width=6, anchor="e")
+        self.time_end.pack(side="right")
+        self.play_btn = self._button(self.seek_row, "Пусни", self._toggle_play)
+        self.play_btn.pack(fill="x", pady=(6, 0))
         self.seek_row.grid_remove()
 
         buttons = tk.Frame(self.root, bg=BG)
@@ -431,14 +447,30 @@ class TemporalApp:
         ok, frame = capture.read()
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
         count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        capture.release()
         if not ok or frame is None:
+            capture.release()
             messagebox.showerror("Temporal FFT", "Клипът няма кадри.")
             return
+        self._stop_play()
+        self._close_capture()
         self.path = path
         self.frames = None
-        self.seek_row.grid_remove()
+        self.capture = capture
+        self.capture_pos = 1
+        self.source_count = max(count, 1)
+        self.play_fps = fps if fps > 1 else 30.0
+        self.play_index = 0
+        last = max(0, self.source_count - 1)
+        self.seek.configure(to=max(1, last))
+        self._seeking = True
+        self.seek_var.set(0)
+        self._seeking = False
         self._show_bgr(frame)
+        self._paint_time()
+        if last > 0:
+            self.seek_row.grid()
+        else:
+            self.seek_row.grid_remove()
         seconds = (count / fps) if fps > 1 and count > 0 else 0
         height, width = frame.shape[:2]
         bits = [os.path.basename(path), f"{width}×{height}"]
@@ -450,12 +482,100 @@ class TemporalApp:
         self.message.configure(text="", fg=MUTED)
         self.run_btn.configure(state="normal")
 
-    def _on_seek(self, _value=None) -> None:
-        if self.frames is None:
+    def _clock(self, frame: int) -> str:
+        fps = self.play_fps if self.play_fps >= 1 else 30.0
+        total = max(0, int(frame / fps))
+        return f"{total // 60}:{total % 60:02d}"
+
+    def _play_count(self) -> int:
+        if self.frames is not None:
+            return int(self.frames.shape[0])
+        return int(self.source_count)
+
+    def _close_capture(self) -> None:
+        if self.capture is not None:
+            self.capture.release()
+            self.capture = None
+            self.capture_pos = -1
+
+    def _frame_at(self, index: int) -> np.ndarray | None:
+        if self.frames is not None:
+            return self.frames[index]
+        if not self.path:
+            return None
+        if self.capture is None or not self.capture.isOpened():
+            self.capture = cv2.VideoCapture(self.path)
+            self.capture_pos = 0
+        if self.capture_pos != index:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, frame = self.capture.read()
+        if not ok or frame is None:
+            return None
+        self.capture_pos = index + 1
+        return frame
+
+    def _move_to(self, index: int) -> None:
+        count = self._play_count()
+        if count <= 0:
             return
-        index = int(self.seek_var.get())
-        index = max(0, min(index, self.frames.shape[0] - 1))
-        self._show_bgr(self.frames[index])
+        index = max(0, min(index, count - 1))
+        frame = self._frame_at(index)
+        if frame is None:
+            return
+        self.play_index = index
+        if int(self.seek_var.get()) != index:
+            self._seeking = True
+            self.seek_var.set(index)
+            self._seeking = False
+        self._show_bgr(frame)
+        self._paint_time()
+
+    def _paint_time(self) -> None:
+        count = self._play_count()
+        if count <= 0:
+            return
+        self.time_now.configure(text=self._clock(self.play_index))
+        self.time_end.configure(text=self._clock(count))
+
+    def _toggle_play(self) -> None:
+        if self.busy or self._play_count() < 2:
+            return
+        if self.playing:
+            self._stop_play()
+            return
+        self.playing = True
+        self._paint(self.play_btn, ACCENT, DARK, "Спри")
+        self._play_tick()
+
+    def _stop_play(self) -> None:
+        self.playing = False
+        if self.play_after is not None:
+            self.root.after_cancel(self.play_after)
+            self.play_after = None
+        if getattr(self, "play_btn", None) is not None:
+            self._paint(self.play_btn, RAISED, TEXT, "Пусни")
+
+    def _play_tick(self) -> None:
+        if not self.playing:
+            return
+        count = self._play_count()
+        if count < 2:
+            self._stop_play()
+            return
+        nxt = 0 if self.play_index >= count - 1 else self.play_index + 1
+        self._move_to(nxt)
+        delay = max(16, int(1000 / max(1.0, min(60.0, self.play_fps))))
+        self.play_after = self.root.after(delay, self._play_tick)
+
+    def _on_seek(self, _value=None) -> None:
+        if self._seeking:
+            return
+        self._move_to(int(self.seek_var.get()))
+
+    def _on_close(self) -> None:
+        self._stop_play()
+        self._close_capture()
+        self.root.destroy()
 
     def _show_bgr(self, frame: np.ndarray) -> None:
         self._shown = frame
@@ -509,6 +629,7 @@ class TemporalApp:
         max_seconds = None if self.full_clip.get() else float(self.seconds_var.get())
         self.busy = True
         self.cancel_flag = False
+        self._stop_play()
         self.run_btn.configure(state="disabled")
         self.open_btn.configure(state="disabled")
         if not self.cancel_btn.winfo_ismapped():
@@ -539,6 +660,7 @@ class TemporalApp:
 
             write_video(dest, result, fps, writing, lambda: self.cancel_flag)
             self.frames = result
+            self.play_fps = float(fps)
             name = os.path.basename(dest)
             note = "спектър" if mode == "spectrum" else "без звук"
             self.root.after(0, lambda: self._finish(f"Готово: {name}  ·  {note}"))
@@ -563,14 +685,20 @@ class TemporalApp:
         if error and text != "Спряно.":
             messagebox.showerror("Temporal FFT", text)
         if self.frames is not None and not error:
+            self._close_capture()
+            self._stop_play()
             last = self.frames.shape[0] - 1
+            self.play_index = 0
             self.seek.configure(to=max(1, last))
+            self._seeking = True
             self.seek_var.set(0)
+            self._seeking = False
             if last > 0:
                 self.seek_row.grid()
             else:
                 self.seek_row.grid_remove()
             self._show_bgr(self.frames[0])
+            self._paint_time()
 
 
 def main() -> None:
