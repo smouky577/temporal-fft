@@ -6,13 +6,13 @@
 
 ## Телефон
 
-Свали **Temporal-FFT-1.4.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
+Свали **Temporal-FFT-1.5.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
 
 Кодът за телефона е в папката `android`.
 
 ## Windows
 
-Свали **Temporal-FFT-Windows-1.4.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
+Свали **Temporal-FFT-Windows-1.5.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
 
 Не отваряй `temporal_app.py` и `temporal.py` в сайта и не копирай текста в нов файл. Така файловете само се показват, не се свалят.
 
@@ -36,9 +36,9 @@ C:\Python314\python.exe temporal_app.py
 
 ## Режими
 
-- **Бързи** — маха промените под границата в херцове и оставя бързото около сиво
+- **Бързи** — пази картината и усилва движението над границата в херцове
 - **Бавни** — оставя само бавното, с реалните цветове
-- **Лента** — оставя честотите между долната и горната граница
+- **Лента** — пази картината и усилва честотите между долната и горната граница
 - **Спектър** — кадрите са честоти: първите са бавни, последните са бързи
 
 По подразбиране ширината е 480 px и клипът е до 10 секунди. Отметките **Оригинал** и **Цял клип** махат тези граници. Звукът не се пренася.
@@ -53,13 +53,13 @@ There is a phone app and a Windows app. The clip and the save location are chose
 
 ## Phone
 
-Download **Temporal-FFT-1.4.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
+Download **Temporal-FFT-1.5.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
 
 The phone source is in the `android` folder.
 
 ## Windows
 
-Download **Temporal-FFT-Windows-1.4.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
+Download **Temporal-FFT-Windows-1.5.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
 
 Do not open `temporal_app.py` or `temporal.py` on the site and do not paste them into a new file. That only shows the text.
 
@@ -83,9 +83,9 @@ Any missing library is printed there.
 
 ## Modes
 
-- **Fast** — removes changes below the cutoff in hertz and keeps the fast part around gray
+- **Fast** — keeps the picture and amplifies motion above the cutoff in hertz
 - **Slow** — keeps only the slow part, in the real colors
-- **Band** — keeps frequencies between the low and high limits
+- **Band** — keeps the picture and amplifies frequencies between the low and high limits
 - **Spectrum** — frames are frequencies: the first are slow, the last are fast
 
 The default width is 480 px and the clip is limited to 10 seconds. **Original size** and **Whole clip** remove those limits. Audio is not copied.

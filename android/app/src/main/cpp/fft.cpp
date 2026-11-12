@@ -287,9 +287,9 @@ void filter_series(
     }
     if ((plan.n % 2) == 0) s.im_b[plan.n / 2] = 0.0;
     irfft(plan, s, s.re_b, s.im_b, s.time);
-    bool center = mode != 1;
+    bool add_onto_original = mode != 1;
     for (int t = 0; t < plan.n; t++) {
-        double v = center ? (128.0 + gain * s.time[t]) : s.time[t];
+        double v = add_onto_original ? (x[t] + gain * s.time[t]) : s.time[t];
         if (v < 0.0) v = 0.0;
         if (v > 255.0) v = 255.0;
         dest[t] = (float)v;
@@ -358,7 +358,7 @@ int check_highpass() {
     }
     filter_series(plan, scratch, x.data(), 0, (double)n, 1.5, 0.0, 0.0, 2.0, scratch.ch[0]);
     for (int t = 0; t < n; t++) {
-        double expect = 128.0 + 6.0 * std::sin(2.0 * kPi * 2.0 * t / n);
+        double expect = 40.0 + 9.0 * std::sin(2.0 * kPi * 2.0 * t / n);
         if (std::abs(scratch.ch[0][t] - expect) > 1e-3) return 1000;
     }
     return 0;

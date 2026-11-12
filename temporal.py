@@ -1,8 +1,8 @@
 """Temporal FFT for a whole clip.
 
-Same filter as temporal_fft.py: one real FFT along time, per pixel and
-color channel. Static light becomes gray in the highpass. Slow change stays
-in the lowpass.
+One real FFT along time, per pixel and color channel. Highpass and bandpass
+keep the original frame and add the amplified motion. Lowpass keeps the
+slow component itself.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def filter_clip(
     if mode == "lowpass":
         out = np.clip(result, 0, 255)
     else:
-        out = np.clip(128 + gain * result, 0, 255)
+        out = np.clip(video + gain * result, 0, 255)
     return out.astype(np.uint8)
 
 
@@ -115,14 +115,14 @@ def _self_test() -> None:
     sine = 40 + 3 * np.sin(2 * np.pi * 2 * np.arange(count) / count)
     video = np.broadcast_to(sine[:, None, None, None], (count, 2, 2, 3)).astype(np.float32).copy()
     fast = filter_clip(video, fps, "highpass", 1.5, 0, 0, 2).astype(np.float32)
-    expect = 128 + 6 * np.sin(2 * np.pi * 2 * np.arange(count) / count)
+    expect = 40 + 9 * np.sin(2 * np.pi * 2 * np.arange(count) / count)
     assert np.max(np.abs(fast - expect[:, None, None, None])) < 2
 
     slow = filter_clip(video, fps, "lowpass", 0.5, 0, 0, 1)
     assert np.all(np.abs(slow.astype(np.int16) - 40) <= 1)
 
     band = filter_clip(video, fps, "bandpass", 0, 1.5, 2.5, 1).astype(np.float32)
-    band_expect = 128 + 3 * np.sin(2 * np.pi * 2 * np.arange(count) / count)
+    band_expect = 40 + 6 * np.sin(2 * np.pi * 2 * np.arange(count) / count)
     assert np.max(np.abs(band - band_expect[:, None, None, None])) < 2
 
     spec = filter_clip(video, fps, "spectrum", 0, 0, 0, 1)
