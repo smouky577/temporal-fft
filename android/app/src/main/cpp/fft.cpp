@@ -264,7 +264,8 @@ void filter_series(
     double low,
     double high,
     double gain,
-    float* dest
+    float* dest,
+    int look
 ) {
     rfft(plan, s, x, s.re_b, s.im_b);
     if (mode == 3) {
@@ -287,9 +288,9 @@ void filter_series(
     }
     if ((plan.n % 2) == 0) s.im_b[plan.n / 2] = 0.0;
     irfft(plan, s, s.re_b, s.im_b, s.time);
-    bool add_onto_original = mode != 1;
     for (int t = 0; t < plan.n; t++) {
-        double v = add_onto_original ? (x[t] + gain * s.time[t]) : s.time[t];
+        double v = s.time[t];
+        if (mode != 1) v = (look == 0 ? 128.0 : x[t]) + gain * v;
         if (v < 0.0) v = 0.0;
         if (v > 255.0) v = 255.0;
         dest[t] = (float)v;
@@ -356,10 +357,12 @@ int check_highpass() {
     for (int t = 0; t < n; t++) {
         x[t] = (float)(40.0 + 3.0 * std::sin(2.0 * kPi * 2.0 * t / n));
     }
-    filter_series(plan, scratch, x.data(), 0, (double)n, 1.5, 0.0, 0.0, 2.0, scratch.ch[0]);
+    filter_series(plan, scratch, x.data(), 0, (double)n, 1.5, 0.0, 0.0, 2.0, scratch.ch[0], 1);
+    filter_series(plan, scratch, x.data(), 0, (double)n, 1.5, 0.0, 0.0, 2.0, scratch.ch[1], 0);
     for (int t = 0; t < n; t++) {
-        double expect = 40.0 + 9.0 * std::sin(2.0 * kPi * 2.0 * t / n);
-        if (std::abs(scratch.ch[0][t] - expect) > 1e-3) return 1000;
+        double wave = std::sin(2.0 * kPi * 2.0 * t / n);
+        if (std::abs(scratch.ch[0][t] - (40.0 + 9.0 * wave)) > 1e-3) return 1000;
+        if (std::abs(scratch.ch[1][t] - (128.0 + 6.0 * wave)) > 1e-3) return 1001;
     }
     return 0;
 }
@@ -454,7 +457,9 @@ struct Job {
     double low = 0.5;
     double high = 3;
     double gain = 3;
+    int look = 0;
     float ref = 1;
+    std::vector<int> bins;
     std::atomic<int> next{0};
     std::atomic<int> done{0};
     std::atomic<int> finished{0};
@@ -489,12 +494,18 @@ void color_row(Job& job, int y, Scratch& scratch) {
     for (int x = 0; x < clip.w; x++) {
         for (int c = 0; c < 3; c++) {
             load_series(clip, c, y, x, plan.n, scratch.series);
-            filter_series(plan, scratch, scratch.series, job.mode, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[c]);
+            filter_series(plan, scratch, scratch.series, job.mode, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[c], job.look);
         }
         for (int t = 0; t < plan.n; t++) {
             int r = (int)scratch.ch[0][t];
             int g = (int)scratch.ch[1][t];
             int b = (int)scratch.ch[2][t];
+            if (job.look == 2) {
+                int yv = (int)(0.299 * r + 0.587 * g + 0.114 * b + 0.5);
+                if (yv < 0) yv = 0;
+                if (yv > 255) yv = 255;
+                r = g = b = yv;
+            }
             clip.out[(size_t)t * clip.w * clip.h + y * clip.w + x] =
                 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
         }
@@ -507,12 +518,13 @@ void mag_row(Job& job, int y, Scratch& scratch) {
     for (int x = 0; x < clip.w; x++) {
         for (int c = 0; c < 3; c++) {
             load_series(clip, c, y, x, plan.n, scratch.series);
-            filter_series(plan, scratch, scratch.series, 3, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[0]);
+            filter_series(plan, scratch, scratch.series, 3, job.fps, job.cutoff, job.low, job.high, job.gain, scratch.ch[0], 0);
             float* dest = clip.mags + (((size_t)c * clip.h + y) * clip.w + x) * plan.bins;
-            for (int k = 0; k < plan.bins; k++) {
-                float mag = scratch.ch[0][k];
-                dest[k] = mag;
-                if (k > 0 && scratch.hist) {
+            for (int k = 0; k < plan.bins; k++) dest[k] = scratch.ch[0][k];
+            if (scratch.hist) {
+                for (int k : job.bins) {
+                    if (k <= 0) continue;
+                    float mag = dest[k];
                     int bin = (int)((mag / 24.f) * 4095.f);
                     if (bin < 0) bin = 0;
                     if (bin > 4095) bin = 4095;
@@ -527,12 +539,15 @@ void paint_row(Job& job, int y, Scratch& scratch) {
     Clip& clip = *job.clip;
     const Plan& plan = *job.plan;
     float ref = job.ref < 1e-6f ? 1e-6f : job.ref;
+    float bright = job.gain > 0.0 ? (float)job.gain : 1.f;
+    int frames = (int)job.bins.size();
     for (int x = 0; x < clip.w; x++) {
-        for (int k = 0; k < plan.bins; k++) {
+        for (int frame = 0; frame < frames; frame++) {
+            int k = job.bins[frame];
             int r = 0, g = 0, b = 0;
             for (int c = 0; c < 3; c++) {
                 float mag = clip.mags[(((size_t)c * clip.h + y) * clip.w + x) * plan.bins + k];
-                float scaled = mag / ref;
+                float scaled = mag / ref * bright;
                 if (scaled < 0.f) scaled = 0.f;
                 if (scaled > 1.f) scaled = 1.f;
                 int value = (int)(scaled * 255.f);
@@ -540,7 +555,13 @@ void paint_row(Job& job, int y, Scratch& scratch) {
                 else if (c == 1) g = value;
                 else b = value;
             }
-            clip.out[(size_t)k * clip.w * clip.h + y * clip.w + x] =
+            if (job.look == 2) {
+                int yv = (int)(0.299 * r + 0.587 * g + 0.114 * b + 0.5);
+                if (yv < 0) yv = 0;
+                if (yv > 255) yv = 255;
+                r = g = b = yv;
+            }
+            clip.out[(size_t)frame * clip.w * clip.h + y * clip.w + x] =
                 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
         }
     }
@@ -612,7 +633,7 @@ float percentile_ref(const int* hist) {
     return ref;
 }
 
-int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode, float cutoff, float low, float high, float gain) {
+int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode, float cutoff, float low, float high, float gain, int look) {
     if (clip.count < 4) return -3;
     shrink_samples(clip);
     if (mode < 0 || mode > 3) return -1;
@@ -635,8 +656,32 @@ int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode,
     job.low = low;
     job.high = high;
     job.gain = gain;
+    job.look = look;
     int code = 0;
     if (mode == 3) {
+        if (job.high > job.low) {
+            for (int k = 0; k < plan.bins; k++) {
+                double freq = k * job.fps / plan.n;
+                if (freq >= job.low && freq <= job.high) job.bins.push_back(k);
+            }
+            if (job.bins.empty()) {
+                int best = 0;
+                double mid = (job.low + job.high) * 0.5;
+                double best_d = 1e300;
+                for (int k = 0; k < plan.bins; k++) {
+                    double distance = std::abs(k * job.fps / plan.n - mid);
+                    if (distance < best_d) {
+                        best_d = distance;
+                        best = k;
+                    }
+                }
+                job.bins.push_back(best);
+            }
+        } else {
+            job.bins.resize(plan.bins);
+            for (int k = 0; k < plan.bins; k++) job.bins[k] = k;
+        }
+        int frames = (int)job.bins.size();
         size_t mag_n = (size_t)3 * clip.h * clip.w * plan.bins;
         clip.mags = (float*)std::malloc(mag_n * sizeof(float));
         if (!clip.mags) return -2;
@@ -647,7 +692,7 @@ int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode,
             return code;
         }
         job.ref = percentile_ref(job.total_hist);
-        size_t out_n = (size_t)plan.bins * clip.w * clip.h;
+        size_t out_n = (size_t)frames * clip.w * clip.h;
         clip.out = (uint32_t*)std::malloc(out_n * sizeof(uint32_t));
         if (!clip.out) {
             std::free(clip.mags);
@@ -663,11 +708,11 @@ int process_clip(JNIEnv* env, jobject progress, Clip& clip, float fps, int mode,
             clip.out = nullptr;
             return code;
         }
-        clip.out_frames = plan.bins;
+        clip.out_frames = frames;
         std::free(clip.samples);
         clip.samples = nullptr;
         clip.capacity = 0;
-        return plan.bins;
+        return frames;
     }
     size_t out_n = (size_t)plan.n * clip.w * clip.h;
     clip.out = (uint32_t*)std::malloc(out_n * sizeof(uint32_t));
@@ -725,11 +770,12 @@ Java_com_temporalfpt_app_NativeFilter_process(
     jfloat low,
     jfloat high,
     jfloat gain,
+    jint look,
     jobject progress
 ) {
     auto* clip = (Clip*)handle;
     if (clip == nullptr) return -1;
-    return process_clip(env, progress, *clip, fps, mode, cutoff, low, high, gain);
+    return process_clip(env, progress, *clip, fps, mode, cutoff, low, high, gain, look);
 }
 
 extern "C" JNIEXPORT void JNICALL

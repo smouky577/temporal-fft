@@ -62,6 +62,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import java.io.File
+import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -73,12 +75,12 @@ private val Accent = Color(0xFFD6F25C)
 private val Ink = Color(0xFF16180F)
 private val Muted = Color(0xFF9AA194)
 
-private val modes = listOf(
-    0 to "Бързи",
-    1 to "Бавни",
-    2 to "Лента",
-    3 to "Спектър",
-)
+private fun modeLabel(id: Int): String = when (id) {
+    0 -> tr("Бързи", "Fast")
+    1 -> tr("Бавни", "Slow")
+    2 -> tr("Лента", "Band")
+    else -> tr("Спектър", "Spectrum")
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -106,6 +108,7 @@ class FftSession(private val context: android.content.Context) {
     @Volatile private var closed = false
     private var active = 0L
     private var ready = false
+    private var store: FrameStore? = null
     var width = 0
     var height = 0
     var outFrames = 0
@@ -118,7 +121,8 @@ class FftSession(private val context: android.content.Context) {
         low: Float,
         high: Float,
         gain: Float,
-        onProgress: (Float) -> Unit,
+        look: Int,
+        onProgress: (Float, Float) -> Unit,
         onReady: (Int, Int, Int) -> Unit,
         onDone: (String) -> Unit,
         onError: (String) -> Unit,
@@ -128,89 +132,193 @@ class FftSession(private val context: android.content.Context) {
             var handle = 0L
             var decoder: VideoDecoder? = null
             var encoder: Mp4Encoder? = null
+            var preview: FrameStore? = null
             try {
                 val check = NativeFilter.selfTest()
-                if (check != 0) error("Проверката на сметката не мина ($check).")
+                if (check != 0) error(tr("Проверката на сметката не мина ($check).", "The check failed ($check)."))
+                dropPreview(true)
                 decoder = VideoDecoder(context, uri)
-                val clipFps = decoder.fps
-                val maxFrames = (clipFps * MAX_SECONDS).toInt().coerceIn(4, 720)
-                var stored = 0
+                val metaFps = decoder.fps
+                val tenUs = (MAX_SECONDS * 1_000_000f).toLong()
+                val pending = ArrayDeque<IntArray>()
                 var streak = 0
                 var frameW = 0
                 var frameH = 0
-                while (stored < maxFrames && !cancel) {
-                    when (val item = decoder.next()) {
-                        is Decoded.Frame -> {
-                            streak = 0
-                            var frame = scaleMaxWidth(rotateArgb(item.raw, decoder.rotation), MAX_WIDTH)
-                            if (handle == 0L) {
-                                frameW = frame.width
-                                frameH = frame.height
-                                handle = NativeFilter.create(frameW, frameH, maxFrames)
-                                if (handle == 0L) error("Няма достатъчно памет за този клип.")
-                            } else if (frame.width != frameW || frame.height != frameH) {
-                                frame = fitFrame(frame, frameW, frameH)
-                            }
-                            if (!NativeFilter.push(handle, frame.pixels)) {
-                                error("Няма достатъчно памет за този клип.")
-                            }
-                            stored++
-                            val fraction = 0.2f * stored / maxFrames
-                            main.post { onProgress(fraction) }
-                        }
-                        Decoded.Pending -> {
-                            streak++
-                            if (streak > 80) error("Клипът спря да се чете.")
-                        }
-                        Decoded.End -> break
-                    }
+                var readCount = 0
+                var firstUs = Long.MIN_VALUE
+                var lastUs = 0L
+                var pastTime = false
+                var reachedEnd = false
+                var ceiling = 2000
+                var carryLeft = 0
+                var prevTail: Array<IntArray>? = null
+                fun coveredSec(): Float {
+                    val span = lastUs - firstUs
+                    val seconds = if (readCount > 1 && span > 0) span / 1_000_000f else readCount / metaFps
+                    return seconds.coerceIn(0f, MAX_SECONDS)
                 }
+                fun nextPiece(): Decoded {
+                    while (!cancel) {
+                        when (val item = decoder!!.next()) {
+                            is Decoded.Pending -> {
+                                streak++
+                                if (streak > 80) error(tr("Клипът спря да се чете.", "The clip stopped reading."))
+                            }
+                            else -> {
+                                streak = 0
+                                return item
+                            }
+                        }
+                    }
+                    return Decoded.End
+                }
+                fun takeFrame(item: Decoded.Frame): Boolean {
+                    if (firstUs == Long.MIN_VALUE) firstUs = item.timeUs
+                    val elapsed = item.timeUs - firstUs
+                    if (readCount > 0 && elapsed >= tenUs) return false
+                    if (readCount > 0 && elapsed <= 0 && readCount >= (metaFps * MAX_SECONDS).roundToInt().coerceAtLeast(4)) return false
+                    var frame = scaleMaxWidth(rotateArgb(item.raw, decoder!!.rotation), MAX_WIDTH)
+                    if (frameW == 0) {
+                        frameW = frame.width
+                        frameH = frame.height
+                        val file = File(context.cacheDir, "temporal-fft-preview.raw")
+                        if (file.exists()) file.delete()
+                        preview = FrameStore(file, frameW, frameH)
+                    } else if (frame.width != frameW || frame.height != frameH) {
+                        frame = fitFrame(frame, frameW, frameH)
+                    }
+                    pending.add(frame.pixels)
+                    readCount++
+                    lastUs = item.timeUs
+                    val fraction = if (elapsed > 0) 0.55f * elapsed / tenUs else 0.55f * readCount / (metaFps * MAX_SECONDS)
+                    main.post { onProgress(fraction.coerceIn(0f, 0.55f), coveredSec()) }
+                    return true
+                }
+                while (!cancel && (!(pastTime || reachedEnd) || pending.size >= 4)) {
+                    if ((pastTime || reachedEnd) && pending.size < 4) break
+                    val limit = chunkLimit(frameW, frameH, mode).coerceAtMost(ceiling).coerceAtLeast(8)
+                    val batch = ArrayList<IntArray>()
+                    var fresh = 0
+                    while (batch.size < limit && !cancel) {
+                        if (pending.isNotEmpty()) {
+                            batch.add(pending.removeFirst())
+                            if (carryLeft > 0) carryLeft-- else fresh++
+                            continue
+                        }
+                        if (pastTime || reachedEnd) break
+                        when (val item = nextPiece()) {
+                            is Decoded.Frame -> if (takeFrame(item)) fresh++ else pastTime = true
+                            is Decoded.End -> reachedEnd = true
+                            is Decoded.Pending -> Unit
+                        }
+                        if (pastTime || reachedEnd) break
+                    }
+                    if (cancel) break
+                    if (fresh == 0) break
+                    if (batch.size < 4) {
+                        if (preview == null || preview!!.count == 0) error(tr("Твърде малко кадри.", "Too few frames."))
+                        break
+                    }
+                    val span = lastUs - firstUs
+                    val clipFps = if (readCount > 1 && span > 0) {
+                        ((readCount - 1) * 1_000_000f / span).coerceIn(1f, 240f)
+                    } else {
+                        metaFps
+                    }
+                    val processed = filterChunk(batch, frameW, frameH, clipFps, mode, cutoff, low, high, gain, look) { done, total ->
+                        if (total > 0) {
+                            val fraction = 0.55f + 0.25f * done / total
+                            main.post { onProgress(fraction.coerceIn(0.55f, 0.8f), coveredSec()) }
+                        }
+                        cancel
+                    }
+                    handle = processed.handle
+                    if (cancel || processed.code == -5) break
+                    if (processed.code < 0) {
+                        error(
+                            when (processed.code) {
+                                -2 -> tr("Няма достатъчно памет за този клип.", "Not enough memory for this clip.")
+                                -3 -> tr("Твърде малко кадри.", "Too few frames.")
+                                else -> tr("Филтърът спря с код ${processed.code}.", "The filter stopped with code ${processed.code}.")
+                            },
+                        )
+                    }
+                    val used = processed.used
+                    if (used < batch.size) ceiling = used.coerceAtLeast(8)
+                    val isLast = (pastTime || reachedEnd || fresh == 0) && used == batch.size
+                    var seam = if (mode == 3) 0 else (clipFps * 0.5f).roundToInt()
+                    if (seam >= used / 2) seam = used / 4
+                    if (seam < 0) seam = 0
+                    val saved = preview ?: error(tr("Грешка", "Error"))
+                    val scratch = IntArray(frameW * frameH)
+                    val tail = prevTail
+                    val overlap = if (tail == null) 0 else minOf(tail.size, processed.produced)
+                    val end = if (isLast || seam <= 0) processed.produced else maxOf(overlap, processed.produced - seam)
+                    val keptTail = ArrayList<IntArray>()
+                    for (index in 0 until processed.produced) {
+                        NativeFilter.copyFrame(handle, index, scratch)
+                        when {
+                            tail != null && index < overlap -> {
+                                val weight = (index + 1f) / (overlap + 1f)
+                                saved.append(blend(tail[index], scratch, weight))
+                            }
+                            index < end -> saved.append(scratch)
+                            else -> keptTail.add(scratch.copyOf())
+                        }
+                    }
+                    if (handle != 0L) {
+                        NativeFilter.destroy(handle)
+                        handle = 0L
+                    }
+                    prevTail = if (keptTail.isEmpty()) null else keptTail.toTypedArray()
+                    val rebuilt = ArrayDeque<IntArray>()
+                    val kept = if (!isLast && seam > 0) seam else 0
+                    if (kept > 0) {
+                        for (index in used - kept until used) rebuilt.add(batch[index])
+                    }
+                    for (index in used until batch.size) rebuilt.add(batch[index])
+                    pending.clear()
+                    rebuilt.forEach { pending.add(it) }
+                    carryLeft = kept
+                    if (isLast) break
+                }
+                prevTail?.forEach { frame -> preview?.append(frame) }
+                prevTail = null
                 decoder.close()
                 decoder = null
                 if (cancel) {
-                    main.post { onDone("Спряно.") }
+                    main.post { onDone(tr("Спряно.", "Stopped.")) }
                     return@execute
                 }
-                if (stored < 4) error("Твърде малко кадри.")
-                val count = NativeFilter.process(handle, clipFps, mode, cutoff, low, high, gain) { done, total ->
-                    if (total > 0) {
-                        val fraction = 0.2f + 0.65f * done / total
-                        main.post { onProgress(fraction) }
-                    }
-                    cancel
-                }
-                if (cancel || count == -5) {
-                    main.post { onDone("Спряно.") }
-                    return@execute
-                }
-                if (count < 0) {
-                    error(
-                        when (count) {
-                            -2 -> "Няма достатъчно памет за този клип."
-                            -3 -> "Твърде малко кадри."
-                            else -> "Филтърът спря с код $count."
-                        },
-                    )
+                val saved = preview
+                if (saved == null || saved.count < 1) error(tr("Твърде малко кадри.", "Too few frames."))
+                val span = lastUs - firstUs
+                val clipFps = if (readCount > 1 && span > 0) {
+                    ((readCount - 1) * 1_000_000f / span).coerceIn(1f, 240f)
+                } else {
+                    metaFps
                 }
                 var accepted = false
                 gate.withLock {
                     if (closed) return@withLock
-                    val previous = active
-                    active = handle
+                    if (active != 0L) {
+                        NativeFilter.destroy(active)
+                        active = 0L
+                    }
                     width = frameW
                     height = frameH
-                    outFrames = count
+                    outFrames = saved.count
                     fps = clipFps
+                    store = saved
+                    preview = null
                     ready = true
-                    handle = 0L
                     accepted = true
-                    if (previous != 0L) NativeFilter.destroy(previous)
                 }
                 if (!accepted) {
-                    main.post { onDone("Спряно.") }
+                    main.post { onDone(tr("Спряно.", "Stopped.")) }
                     return@execute
                 }
-                val shown = outFrames
+                val shown = saved.count
                 main.post { onReady(shown, frameW, frameH) }
                 val pixels = IntArray(frameW * frameH)
                 val writer = Mp4Encoder(context, frameW, frameH, clipFps)
@@ -218,23 +326,34 @@ class FftSession(private val context: android.content.Context) {
                 writer.start()
                 for (index in 0 until shown) {
                     if (cancel) break
-                    gate.withLock {
-                        if (active != 0L) NativeFilter.copyFrame(active, index, pixels)
-                    }
+                    if (!saved.read(index, pixels)) error(tr("Грешка", "Error"))
                     writer.write(pixels)
-                    val fraction = 0.85f + 0.15f * (index + 1) / shown
-                    main.post { onProgress(fraction) }
+                    val fraction = 0.8f + 0.2f * (index + 1) / shown
+                    main.post { onProgress(fraction, coveredSec()) }
                 }
                 val keep = !cancel
                 writer.stop(keep)
                 encoder = null
                 if (!keep) {
-                    main.post { onDone("Спряно.") }
+                    main.post { onDone(tr("Спряно.", "Stopped.")) }
                 } else {
-                    main.post { onDone("Готово · Movies/Temporal FFT · без звук") }
+                    val seconds = coveredSec()
+                    main.post {
+                        onDone(
+                            tr(
+                                "Готово · ${"%.1f".format(seconds)} сек · Movies/Temporal FFT · без звук",
+                                "Done · ${"%.1f".format(seconds)} sec · Movies/Temporal FFT · no audio",
+                            ),
+                        )
+                    }
                 }
             } catch (exc: Throwable) {
-                main.post { onError(exc.message ?: "Грешка") }
+                val message = if (exc is OutOfMemoryError) {
+                    tr("Няма достатъчно памет за този клип.", "Not enough memory for this clip.")
+                } else {
+                    exc.message ?: tr("Грешка", "Error")
+                }
+                main.post { onError(message) }
             } finally {
                 decoder?.close()
                 if (encoder != null) {
@@ -243,6 +362,10 @@ class FftSession(private val context: android.content.Context) {
                     } catch (_: Exception) {
                     }
                 }
+                val leftover = preview
+                preview = null
+                leftover?.close()
+                leftover?.file?.delete()
                 gate.withLock {
                     if (handle != 0L) NativeFilter.destroy(handle)
                     if (closed && active != 0L) {
@@ -250,6 +373,7 @@ class FftSession(private val context: android.content.Context) {
                         active = 0L
                         ready = false
                     }
+                    if (closed) dropPreview(true)
                 }
             }
         }
@@ -257,9 +381,10 @@ class FftSession(private val context: android.content.Context) {
 
     fun bitmap(index: Int): Bitmap? {
         gate.withLock {
-            if (!ready || active == 0L || index !in 0 until outFrames) return null
+            val saved = store
+            if (!ready || saved == null || index !in 0 until outFrames) return null
             val pixels = IntArray(width * height)
-            NativeFilter.copyFrame(active, index, pixels)
+            if (!saved.read(index, pixels)) return null
             return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
         }
     }
@@ -267,9 +392,92 @@ class FftSession(private val context: android.content.Context) {
     fun release() {
         cancel = true
         closed = true
-        gate.withLock { ready = false }
+        gate.withLock {
+            ready = false
+            dropPreview(true)
+        }
         executor.shutdown()
     }
+
+    private fun dropPreview(delete: Boolean) {
+        val saved = store ?: return
+        store = null
+        saved.close()
+        if (delete) saved.file.delete()
+    }
+
+    private fun chunkLimit(width: Int, height: Int, mode: Int): Int {
+        if (width < 2 || height < 2) return 24
+        val frameBytes = width.toLong() * height * 4L
+        val budget = Runtime.getRuntime().maxMemory() / 5
+        val per = if (mode == 3) frameBytes * 2 else frameBytes
+        return (budget / per.coerceAtLeast(1)).toInt().coerceIn(8, 64)
+    }
+}
+
+private data class ChunkProduct(val handle: Long, val used: Int, val produced: Int, val code: Int)
+
+private fun filterChunk(
+    frames: List<IntArray>,
+    width: Int,
+    height: Int,
+    fps: Float,
+    mode: Int,
+    cutoff: Float,
+    low: Float,
+    high: Float,
+    gain: Float,
+    look: Int,
+    progress: (Int, Int) -> Boolean,
+): ChunkProduct {
+    var count = frames.size.coerceAtMost(2000)
+    while (count >= 4) {
+        val handle = NativeFilter.create(width, height, count)
+        if (handle == 0L) {
+            count /= 2
+            continue
+        }
+        var pushed = 0
+        var failed = false
+        while (pushed < count) {
+            if (!NativeFilter.push(handle, frames[pushed])) {
+                failed = true
+                break
+            }
+            pushed++
+        }
+        if (failed) {
+            NativeFilter.destroy(handle)
+            count = pushed / 2
+            continue
+        }
+        val produced = NativeFilter.process(handle, fps, mode, cutoff, low, high, gain, look, progress)
+        if (produced == -2) {
+            NativeFilter.destroy(handle)
+            count /= 2
+            continue
+        }
+        if (produced < 0) {
+            NativeFilter.destroy(handle)
+            return ChunkProduct(0L, 0, 0, produced)
+        }
+        return ChunkProduct(handle, count, produced, produced)
+    }
+    return ChunkProduct(0L, 0, 0, -2)
+}
+
+private fun blend(from: IntArray, to: IntArray, weight: Float): IntArray {
+    val out = IntArray(from.size)
+    val stay = 1f - weight
+    for (index in from.indices) {
+        val left = from[index]
+        val right = to[index]
+        val red = (((left shr 16) and 255) * stay + ((right shr 16) and 255) * weight).roundToInt().coerceIn(0, 255)
+        val green = (((left shr 8) and 255) * stay + ((right shr 8) and 255) * weight).roundToInt().coerceIn(0, 255)
+        val blue = ((left and 255) * stay + (right and 255) * weight).roundToInt().coerceIn(0, 255)
+        out[index] = (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
+    }
+    return out
 }
 
 @Composable
@@ -281,14 +489,15 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     }
     var about by remember { mutableStateOf(false) }
     var source by remember { mutableStateOf<Uri?>(null) }
-    var sourceName by remember { mutableStateOf("Няма избран клип") }
+    var sourceName by remember { mutableStateOf("") }
     var mode by remember { mutableIntStateOf(0) }
     var cutoff by remember { mutableFloatStateOf(2f) }
     var low by remember { mutableFloatStateOf(0.5f) }
     var high by remember { mutableFloatStateOf(3f) }
     var gain by remember { mutableFloatStateOf(3f) }
+    var look by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("До 480 px и 10 секунди. Звукът не се пренася.") }
+    var status by remember { mutableStateOf("") }
     var preview by remember { mutableStateOf<Bitmap?>(null) }
     var frames by remember { mutableIntStateOf(0) }
     var frameIndex by remember { mutableIntStateOf(0) }
@@ -305,8 +514,8 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     val openVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             source = uri
-            sourceName = uri.lastPathSegment ?: "Клип"
-            status = "Клипът е избран."
+            sourceName = uri.lastPathSegment ?: tr("Клип", "Clip")
+            status = tr("Клипът е избран.", "Clip selected.")
         }
     }
 
@@ -322,22 +531,26 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
     val scroll = rememberScrollState()
     Column(modifier = Modifier.fillMaxSize().background(Bg)) {
         Column(modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Temporal FFT", color = Accent, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Row(Modifier.fillMaxWidth()) {
+                Text(
+                    "Temporal FFT",
+                    color = Accent,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f).alignByBaseline(),
+                )
+                LanguageFlag(Modifier.alignBy { it.measuredHeight })
                 Text(
                     "by Dr. Baysinger",
                     color = Muted,
                     fontSize = 11.sp,
                     maxLines = 1,
-                    modifier = Modifier.clickable { about = true },
+                    modifier = Modifier.alignByBaseline().clickable { about = true },
                 )
             }
             Text(
-                "бързи   ·   бавни   ·   лента   ·   спектър",
+                tr("бързи   ·   бавни   ·   лента   ·   спектър", "fast   ·   slow   ·   band   ·   spectrum"),
                 color = Muted,
                 fontSize = 12.sp,
                 lineHeight = 16.sp,
@@ -360,7 +573,7 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                 )
             } else {
                 Text(
-                    "Отвори клип\nРезултатът остава тук",
+                    tr("Отвори клип\nРезултатът остава тук", "Open a clip\nThe result stays here"),
                     color = Muted,
                     textAlign = TextAlign.Center,
                 )
@@ -383,7 +596,7 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                     Text(clock(frames, clipFps), color = Muted, fontSize = 12.sp)
                 }
                 ActionButton(
-                    if (playing) "Спри" else "Пусни",
+                    if (playing) tr("Спри", "Stop") else tr("Пусни", "Play"),
                     if (playing) Accent else Panel,
                     if (playing) Ink else Color.White,
                     frames > 1 && !busy,
@@ -399,10 +612,10 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ActionButton("Отвори", Accent, Ink, !busy, Modifier.weight(1f)) {
+                ActionButton(tr("Отвори", "Open"), Accent, Ink, !busy, Modifier.weight(1f)) {
                     openVideo.launch("video/*")
                 }
-                ActionButton("Обработи", Panel, Color.White, !busy && source != null, Modifier.weight(1f)) {
+                ActionButton(tr("Обработи", "Process"), Panel, Color.White, !busy && source != null, Modifier.weight(1f)) {
                     val uri = source ?: return@ActionButton
                     busy = true
                     onBusy(true)
@@ -410,15 +623,18 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                     frameIndex = 0
                     playing = false
                     preview = null
-                    status = "Чете клипа…"
-                    session.start(uri, mode, cutoff, low, high, gain, { fraction ->
-                        status = "Обработка ${(fraction * 100).roundToInt()}%"
+                    status = tr("Чете клипа…", "Reading the clip…")
+                    session.start(uri, mode, cutoff, low, high, gain, look, { fraction, seconds ->
+                        status = tr(
+                            "Обработка ${(fraction * 100).roundToInt()}% · ${"%.1f".format(seconds)} сек",
+                            "Processing ${(fraction * 100).roundToInt()}% · ${"%.1f".format(seconds)} sec",
+                        )
                     }, { count, _, _ ->
                         frames = count
                         clipFps = session.fps
                         playing = false
                         showFrame(0)
-                        status = "Записва видеото…"
+                        status = tr("Записва видеото…", "Writing the video…")
                     }, { message ->
                         busy = false
                         onBusy(false)
@@ -429,12 +645,13 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                         status = message
                     })
                 }
-                ActionButton("Отказ", Color(0xFFFF4D3A), Color.White, busy, Modifier.weight(1f)) {
+                ActionButton(tr("Отказ", "Cancel"), Color(0xFFFF4D3A), Color.White, busy, Modifier.weight(1f)) {
                     session.cancel = true
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                modes.forEach { (id, label) ->
+                listOf(0, 1, 2, 3).forEach { id ->
+                    val label = modeLabel(id)
                     val selected = mode == id
                     ActionButton(
                         label,
@@ -445,17 +662,37 @@ private fun FftScreen(onBusy: (Boolean) -> Unit) {
                     ) { mode = id }
                 }
             }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ActionButton(
+                    if (look == 2) tr("Черно-бяло ВКЛ", "Black & white ON") else tr("Черно-бяло", "Black & white"),
+                    if (look == 2) Accent else Panel,
+                    if (look == 2) Ink else Color.White,
+                    !busy,
+                    Modifier.weight(1f),
+                ) { look = if (look == 2) 0 else 2 }
+                ActionButton(
+                    if (look == 1) tr("Цветове ВКЛ", "Colors ON") else tr("Цветове", "Colors"),
+                    if (look == 1) Accent else Panel,
+                    if (look == 1) Ink else Color.White,
+                    !busy,
+                    Modifier.weight(1f),
+                ) { look = if (look == 1) 0 else 1 }
+            }
             if (mode == 0 || mode == 1) {
-                LabeledSlider("Граница", cutoff, 0.2f..12f, "${"%.1f".format(cutoff)} Hz") { cutoff = it }
+                LabeledSlider(tr("Граница", "Cutoff"), cutoff, 0.2f..12f, "${"%.1f".format(cutoff)} Hz") { cutoff = it }
             }
-            if (mode == 2) {
-                LabeledSlider("Долна", low, 0.1f..12f, "${"%.1f".format(low)} Hz") { low = it.coerceAtMost(high) }
-                LabeledSlider("Горна", high, 0.2f..16f, "${"%.1f".format(high)} Hz") { high = it.coerceAtLeast(low) }
+            if (mode == 2 || mode == 3) {
+                LabeledSlider(tr("Долна", "Low"), low, 0.1f..12f, "${"%.1f".format(low)} Hz") { low = it.coerceAtMost(high) }
+                LabeledSlider(tr("Горна", "High"), high, 0.2f..16f, "${"%.1f".format(high)} Hz") { high = it.coerceAtLeast(low) }
             }
-            if (mode == 0 || mode == 2) {
-                LabeledSlider("Усилване", gain, 0.5f..8f, "${"%.1f".format(gain)}×") { gain = it }
+            if (mode == 0 || mode == 2 || mode == 3) {
+                LabeledSlider(tr("Усилване", "Gain"), gain, 0.5f..8f, "${"%.1f".format(gain)}×") { gain = it }
             }
-            Text(if (source == null) status else "$sourceName    $status", color = Muted, fontSize = 12.sp)
+            val shownStatus = status.ifEmpty {
+                tr("До 480 px и 10 секунди. Звукът не се пренася.", "Up to 480 px and 10 seconds. Audio is not copied.")
+            }
+            val shownName = sourceName.ifEmpty { tr("Няма избран клип", "No clip selected") }
+            Text(if (source == null) shownStatus else "$shownName    $shownStatus", color = Muted, fontSize = 12.sp)
         }
         if (about) {
             AboutDialog { about = false }
@@ -568,7 +805,7 @@ private fun CopyLine(value: String, context: Context) {
             .clickable {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("address", value))
-                Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, tr("Копирано", "Copied"), Toast.LENGTH_SHORT).show()
             }
             .padding(vertical = 6.dp),
     )

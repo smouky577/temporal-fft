@@ -15,7 +15,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -136,7 +139,7 @@ private fun scaleTo(frame: RawFrame, width: Int, height: Int): RawFrame {
 }
 
 sealed class Decoded {
-    data class Frame(val raw: RawFrame) : Decoded()
+    data class Frame(val raw: RawFrame, val timeUs: Long) : Decoded()
     data object Pending : Decoded()
     data object End : Decoded()
 }
@@ -211,7 +214,7 @@ class VideoDecoder(context: Context, uri: Uri) {
                     null
                 }
                 codec.releaseOutputBuffer(outIndex, false)
-                if (frame != null) return Decoded.Frame(frame)
+                if (frame != null) return Decoded.Frame(frame, info.presentationTimeUs)
                 if (eos) return Decoded.End
             }
         }
@@ -231,7 +234,7 @@ class VideoDecoder(context: Context, uri: Uri) {
 }
 
 class Mp4Encoder(private val context: Context, private val width: Int, private val height: Int, fps: Float) {
-    private val frameRate = fps.toInt().coerceIn(1, 60)
+    private var frameRate = fps.toInt().coerceIn(1, 240)
     private var encoder: MediaCodec? = null
     private var muxer: MediaMuxer? = null
     private var track = -1
@@ -258,17 +261,37 @@ class Mp4Encoder(private val context: Context, private val width: Int, private v
         val pfd = context.contentResolver.openFileDescriptor(target, "w") ?: error("Не мога да запиша видеото.")
         descriptor = pfd
         colorFormat = chooseColorFormat()
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
-            setInteger(MediaFormat.KEY_BIT_RATE, width * height * 5)
-            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-        }
-        encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
-            it.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            it.start()
-        }
+        frameRate = openCodec(frameRate)
         muxer = MediaMuxer(pfd.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    }
+
+    private fun openCodec(rate: Int): Int {
+        fun build(speed: Int): MediaCodec {
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+                setInteger(MediaFormat.KEY_BIT_RATE, width * height * 5)
+                setInteger(MediaFormat.KEY_FRAME_RATE, speed)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            }
+            return MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
+                it.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                it.start()
+            }
+        }
+        return try {
+            encoder = build(rate)
+            rate
+        } catch (first: Throwable) {
+            try {
+                encoder?.release()
+            } catch (_: Exception) {
+            }
+            encoder = null
+            val slower = rate.coerceAtMost(60).coerceAtLeast(1)
+            if (slower == rate) throw first
+            encoder = build(slower)
+            slower
+        }
     }
 
     fun write(pixels: IntArray) {
@@ -401,6 +424,38 @@ class Mp4Encoder(private val context: Context, private val width: Int, private v
             semi in formats -> semi
             planar in formats -> planar
             else -> formats.firstOrNull() ?: semi
+        }
+    }
+}
+
+internal class FrameStore(val file: File, private val width: Int, private val height: Int) {
+    private val raf = RandomAccessFile(file, "rw")
+    private val bytes = width * height * 4
+    private val buf = ByteBuffer.allocate(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    var count = 0
+        private set
+
+    fun append(pixels: IntArray) {
+        buf.clear()
+        buf.asIntBuffer().put(pixels, 0, width * height)
+        raf.seek(count.toLong() * bytes)
+        raf.write(buf.array(), 0, bytes)
+        count++
+    }
+
+    fun read(index: Int, dest: IntArray): Boolean {
+        if (index < 0 || index >= count || dest.size < width * height) return false
+        raf.seek(index.toLong() * bytes)
+        raf.readFully(buf.array(), 0, bytes)
+        buf.clear()
+        buf.asIntBuffer().get(dest, 0, width * height)
+        return true
+    }
+
+    fun close() {
+        try {
+            raf.close()
+        } catch (_: Exception) {
         }
     }
 }

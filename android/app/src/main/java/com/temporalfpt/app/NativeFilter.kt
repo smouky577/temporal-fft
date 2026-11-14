@@ -23,6 +23,7 @@ object NativeFilter {
         low: Float,
         high: Float,
         gain: Float,
+        look: Int,
         progress: RowProgress,
     ): Int
 
