@@ -6,7 +6,7 @@
 
 ## Телефон
 
-Свали **Temporal-FFT-1.6.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
+Свали **Temporal-FFT-1.7.apk** от [Releases](https://github.com/smouky577/temporal-fft/releases) и го инсталирай. Ако Android попита, разреши инсталация от този файл.
 
 Кодът за телефона е в папката `android`.
 
@@ -59,7 +59,7 @@ There is a phone app and a Windows app. The clip and the save location are chose
 
 ## Phone
 
-Download **Temporal-FFT-1.6.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
+Download **Temporal-FFT-1.7.apk** from [Releases](https://github.com/smouky577/temporal-fft/releases) and install it. Allow installation from this file if Android asks.
 
 The phone source is in the `android` folder.
 
