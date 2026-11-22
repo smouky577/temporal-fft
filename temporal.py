@@ -7,6 +7,7 @@ slow component itself.
 
 from __future__ import annotations
 
+import gc
 import os
 import shutil
 import tempfile
@@ -14,9 +15,6 @@ import ctypes
 
 import cv2
 import numpy as np
-
-CHUNK_SECONDS = 3.0
-OVERLAP_SECONDS = 0.5
 
 
 class Stopped(Exception):
@@ -91,15 +89,20 @@ def _progress_line(
     return text
 
 
+def _row_line(done: int, rows: int, lang: str) -> str:
+    if lang == "en":
+        return f"Computing row {done}/{rows}"
+    return f"Смята ред {done}/{rows}"
+
+
 def chunk_plan(frames: int, height: int, width: int, free_bytes: int) -> tuple[bool, int]:
+    # float32 frames + complex spectrum + inverse transform + temporaries
     per = max(1, height * width * 3)
-    need = per * max(frames, 1) * 6 + 2 * 1024**3
+    need = per * max(frames, 1) * 20 + 2 * 1024**3
     if frames > 0 and need <= free_bytes:
         return False, frames
     room = min(max(free_bytes // 2, per * 8), 8 * 1024**3)
     chunk = max(8, int(room // per))
-    if frames > 0 and chunk >= frames:
-        return False, frames
     return True, chunk
 
 
@@ -227,25 +230,157 @@ def _drop_memmap(mapped) -> None:
         pass
     handle = getattr(mapped, "_mmap", None)
     if handle is not None:
-        handle.close()
+        try:
+            handle.close()
+        except Exception:
+            pass
+        try:
+            mapped._mmap = None
+        except Exception:
+            pass
 
 
-def _filter_rows(src, dst, fps, mode, cutoff, low, high, gain, cancel, progress, colors: bool = False) -> None:
-    count, height, width, channels = src.shape
-    row_bytes = max(1, count * width * channels * 4)
-    band = max(1, min(height, (64 * 1024 * 1024) // row_bytes))
+def _check_cancel(cancel) -> None:
+    if cancel is not None and cancel():
+        raise Stopped()
+
+
+def _band_size(count: int, height: int, width: int, channels: int, max_band: int | None) -> int:
+    row_bytes = max(1, int(count) * int(width) * int(channels) * 4)
+    band = max(1, min(int(height), (64 * 1024 * 1024) // row_bytes))
+    if max_band is not None:
+        band = max(1, min(band, int(max_band)))
     if band > 1 and band % 2:
         band -= 1
+    return max(1, band)
+
+
+def _freq_index(count: int, fps: float, low: float, high: float) -> np.ndarray:
+    freqs = np.fft.rfftfreq(count, d=1.0 / fps)
+    if high > low:
+        chosen = np.flatnonzero((freqs >= low) & (freqs <= high))
+        if chosen.size == 0:
+            middle = (float(low) + float(high)) * 0.5
+            chosen = np.array([int(np.argmin(np.abs(freqs - middle)))], dtype=np.int64)
+        return np.asarray(chosen, dtype=np.int64)
+    return np.arange(freqs.size, dtype=np.int64)
+
+
+def _histogram_ref(point: int, hist: np.ndarray, log_lo: float, log_hi: float, min_pos: float) -> float:
+    positive = int(hist.sum())
+    total = int(point) + positive
+    if total <= 0 or positive <= 0:
+        return 1.0
+    if total == 1:
+        return 1.0 if min_pos <= 1e-8 else float(min_pos)
+    target = 0.995 * (total - 1)
+    lower = int(np.floor(target))
+    upper = int(np.ceil(target))
+    frac = target - lower
+    if upper < point:
+        return 1.0
+    if lower < point:
+        value = frac * float(min_pos)
+        return 1.0 if value <= 1e-8 else float(value)
+    rank = target - point
+    width = (log_hi - log_lo) / float(hist.size)
+    running = 0.0
+    estimate = log_hi
+    for index, count in enumerate(hist.tolist()):
+        count = int(count)
+        if count <= 0:
+            continue
+        nxt = running + count
+        if rank < nxt:
+            estimate = log_lo + (index + (rank - running) / count) * width
+            break
+        running = nxt
+    ref = float(np.exp(estimate))
+    if ref <= 1e-8:
+        return 1.0
+    return ref
+
+
+def _spectrum_stored(src, dst, fps, low, high, gain, cancel, on_band, max_band) -> None:
+    count, height, width, channels = src.shape
+    freqs = np.fft.rfftfreq(count, d=1.0 / fps)
+    keep = _freq_index(count, fps, low, high)
+    kept = int(keep.size)
+    drop_dc = kept > 1 and float(freqs[int(keep[0])]) <= 1e-8
+    band = _band_size(count, height, width, channels, max_band)
+    folder = tempfile.mkdtemp(prefix="temporal-fft-mag-")
+    mag = None
+    try:
+        mag = np.memmap(
+            os.path.join(folder, "mag.dat"),
+            dtype=np.float32,
+            mode="w+",
+            shape=(kept, height, width, channels),
+        )
+        # Log bins: a linear 4096-bin grid smears the quiet tail and the
+        # scaled frame drifts by more than a couple of levels.
+        bins = 4096
+        point_cut = 1e-8
+        mag_cap = float(np.log1p(float(count) * 255.0)) + 1.0
+        if mag_cap <= point_cut:
+            mag_cap = point_cut * 10.0
+        log_lo = float(np.log(point_cut))
+        log_hi = float(np.log(mag_cap))
+        hist = np.zeros(bins, dtype=np.int64)
+        point = 0
+        min_pos = None
+        for top in range(0, height, band):
+            _check_cancel(cancel)
+            bottom = min(height, top + band)
+            slab = np.array(src[:, top:bottom], dtype=np.float32, copy=True)
+            spectrum = np.fft.rfft(slab, axis=0)
+            part = np.log1p(np.abs(spectrum[keep])).astype(np.float32, copy=False)
+            mag[:, top:bottom] = part
+            sample = part[1:] if drop_dc else part
+            if sample.size:
+                point += int(np.count_nonzero(sample <= point_cut))
+                positive = sample[sample > point_cut]
+                if positive.size:
+                    smallest = float(positive.min())
+                    min_pos = smallest if min_pos is None else min(min_pos, smallest)
+                    logs = np.log(np.clip(np.asarray(positive, dtype=np.float64), point_cut, mag_cap))
+                    hist += np.histogram(logs, bins=bins, range=(log_lo, log_hi))[0]
+            del slab, spectrum, part, sample
+            if on_band is not None:
+                on_band(bottom, height)
+        ref = _histogram_ref(point, hist, log_lo, log_hi, 0.0 if min_pos is None else min_pos)
+        scale = gain if gain > 0 else 1.0
+        for top in range(0, height, band):
+            _check_cancel(cancel)
+            bottom = min(height, top + band)
+            part = np.array(mag[:, top:bottom], dtype=np.float64, copy=True)
+            dst[:, top:bottom] = (np.clip(part / ref * scale, 0.0, 1.0) * 255.0).astype(np.uint8)
+            del part
+            if on_band is not None:
+                on_band(bottom, height)
+        mag.flush()
+    finally:
+        _drop_memmap(mag)
+        mag = None
+        gc.collect()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _filter_stored(src, dst, fps, mode, cutoff, low, high, gain, colors, cancel, on_band, max_band=None) -> None:
+    if mode == "spectrum":
+        _spectrum_stored(src, dst, fps, low, high, gain, cancel, on_band, max_band)
+        return
+    count, height, width, channels = src.shape
+    band = _band_size(count, height, width, channels, max_band)
     for top in range(0, height, band):
-        if cancel is not None and cancel():
-            raise Stopped()
+        _check_cancel(cancel)
         bottom = min(height, top + band)
         slab = np.array(src[:, top:bottom], dtype=np.float32, copy=True)
         filtered = filter_clip(slab, fps, mode, cutoff, low, high, gain, colors)
         dst[:, top:bottom] = filtered
         del slab, filtered
-        if progress is not None:
-            progress(bottom, height)
+        if on_band is not None:
+            on_band(bottom, height)
 
 
 def render_clip(
@@ -266,9 +401,14 @@ def render_clip(
     chunk_frames: int | None = None,
     overlap_frames: int | None = None,
 ) -> tuple[int, float]:
-    """Filter a clip in short windows and write one continuous file."""
+    """Filter every frame along time, in row strips, and write one file.
+
+    chunk_frames and overlap_frames are accepted and ignored.
+    """
+    del chunk_frames, overlap_frames
     capture = cv2.VideoCapture(path)
     if not capture.isOpened():
+        capture.release()
         raise RuntimeError(say_error(lang, "open"))
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
     if fps < 1 or fps > 240:
@@ -276,20 +416,6 @@ def render_clip(
     reported = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     limit = None if max_seconds is None else max(4, int(max_seconds * fps))
     total = reported if limit is None else (min(reported, limit) if reported else limit)
-    if chunk_frames:
-        chunk = max(4, int(chunk_frames))
-    else:
-        chunk = max(4, int(round(CHUNK_SECONDS * fps)))
-    if mode == "spectrum":
-        overlap = 0
-    elif overlap_frames is not None:
-        overlap = max(0, int(overlap_frames))
-    else:
-        overlap = max(0, int(round(OVERLAP_SECONDS * fps)))
-    if overlap >= chunk // 2:
-        overlap = max(0, chunk // 4)
-    if mode == "spectrum":
-        overlap = 0
 
     ok, first = capture.read()
     if not ok or first is None:
@@ -297,7 +423,6 @@ def render_clip(
         raise RuntimeError(say_error(lang, "no_frames"))
     first = _fit_width(first, max_width)
     height, width = first.shape[:2]
-    pending = [first]
     ext = os.path.splitext(dest)[1].lower()
     code = "XVID" if ext == ".avi" else "mp4v"
     writer = cv2.VideoWriter(dest, cv2.VideoWriter_fourcc(*code), float(fps), (width, height))
@@ -306,126 +431,98 @@ def render_clip(
         raise RuntimeError(say_error(lang, "no_writer"))
 
     work = tempfile.mkdtemp(prefix="temporal-fft-")
-    written = 0
-    seen = 0
-    carry = None
-    prev_tail = None
-    stopped = False
+    src = None
+    dst = None
+    writer_open = True
 
     def say(text: str) -> None:
         if progress is not None:
             progress(text)
 
-    def read_frame():
-        if pending:
-            return pending.pop(0)
-        if cancel is not None and cancel():
-            raise Stopped()
-        got, frame = capture.read()
-        if not got or frame is None:
-            return None
-        frame = _fit_width(frame, max_width)
-        if frame.shape[0] != height or frame.shape[1] != width:
-            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-        return frame
-
-    def emit(frame: np.ndarray) -> None:
-        nonlocal written
-        if gray:
-            mono = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
-        writer.write(np.ascontiguousarray(frame))
-        written += 1
-
     try:
-        while not stopped:
-            if cancel is not None and cancel():
-                raise Stopped()
-            raw_path = os.path.join(work, "in.dat")
-            out_path = os.path.join(work, "out.dat")
-            count = 0
-            with open(raw_path, "wb") as raw:
-                if carry is not None:
-                    raw.write(np.ascontiguousarray(carry).tobytes())
-                    count = int(carry.shape[0])
-                while count < chunk:
-                    if limit is not None and seen >= limit:
-                        break
-                    frame = read_frame()
-                    if frame is None:
-                        stopped = True
-                        break
-                    raw.write(np.ascontiguousarray(frame).tobytes())
-                    count += 1
-                    seen += 1
-                    if seen == 1 or seen % 8 == 0:
-                        say(_progress_line("read", seen, total, None, None, fps, lang))
-            if count < 4:
-                if prev_tail is not None:
-                    for frame in prev_tail:
-                        emit(np.array(frame))
-                    prev_tail = None
-                if written == 0:
-                    raise RuntimeError(say_error(lang, "too_few"))
-                break
-            is_last = stopped or count < chunk or (limit is not None and seen >= limit)
-            src = np.memmap(raw_path, dtype=np.uint8, mode="r", shape=(count, height, width, 3))
-            out_count = count // 2 + 1 if mode == "spectrum" else count
-            dst = np.memmap(out_path, dtype=np.uint8, mode="w+", shape=(out_count, height, width, 3))
-            try:
-                say(_progress_line("compute", seen, total, None, None, fps, lang))
-
-                def band_progress(done_rows: int, rows: int) -> None:
-                    say(_progress_line("compute", seen, total, done_rows, rows, fps, lang))
-
-                _filter_rows(src, dst, fps, mode, cutoff, low, high, gain, cancel, band_progress, colors or gray)
-                dst.flush()
-                if overlap and not is_last:
-                    carry = np.array(src[count - overlap : count])
+        raw_path = os.path.join(work, "in.dat")
+        seen = 0
+        pending = first
+        with open(raw_path, "wb") as raw:
+            while True:
+                _check_cancel(cancel)
+                if limit is not None and seen >= limit:
+                    break
+                if pending is not None:
+                    frame = pending
+                    pending = None
                 else:
-                    carry = None
-            finally:
-                _drop_memmap(src)
-                src = None
-            try:
-                ov = 0 if prev_tail is None else min(int(prev_tail.shape[0]), out_count)
-                for index in range(ov):
-                    weight = (index + 1) / (ov + 1)
-                    mixed = prev_tail[index].astype(np.float32) * (1.0 - weight)
-                    mixed += dst[index].astype(np.float32) * weight
-                    emit(np.clip(mixed, 0, 255).astype(np.uint8))
-                end = out_count if is_last or overlap <= 0 else max(ov, out_count - overlap)
-                for index in range(ov, end):
-                    emit(dst[index])
-                if not is_last and overlap > 0:
-                    prev_tail = np.array(dst[end:out_count])
-                else:
-                    prev_tail = None
-            finally:
-                _drop_memmap(dst)
-                dst = None
-                for leftover in (raw_path, out_path):
-                    try:
-                        os.remove(leftover)
-                    except OSError:
-                        pass
-            if is_last:
-                break
+                    got, frame = capture.read()
+                    if not got or frame is None:
+                        break
+                    frame = _fit_width(frame, max_width)
+                    if frame.shape[0] != height or frame.shape[1] != width:
+                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                raw.write(np.ascontiguousarray(frame).tobytes())
+                seen += 1
+                if seen == 1 or seen % 8 == 0:
+                    say(_progress_line("read", seen, total, None, None, fps, lang))
+        if seen > 1 and seen % 8 != 0:
+            say(_progress_line("read", seen, total, None, None, fps, lang))
+        if seen < 4:
+            raise RuntimeError(say_error(lang, "too_few"))
+
+        src = np.memmap(raw_path, dtype=np.uint8, mode="r", shape=(seen, height, width, 3))
+        out_count = int(_freq_index(seen, fps, low, high).size) if mode == "spectrum" else seen
+        dst = np.memmap(
+            os.path.join(work, "out.dat"),
+            dtype=np.uint8,
+            mode="w+",
+            shape=(out_count, height, width, 3),
+        )
+
+        def on_band(done: int, rows: int) -> None:
+            say(_row_line(done, rows, lang))
+
+        _filter_stored(
+            src,
+            dst,
+            fps,
+            mode,
+            cutoff,
+            low,
+            high,
+            gain,
+            bool(colors or gray),
+            cancel,
+            on_band,
+        )
+        dst.flush()
+        written = 0
+        for index in range(out_count):
+            _check_cancel(cancel)
+            frame = np.array(dst[index], copy=True)
+            if gray:
+                mono = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                frame = cv2.cvtColor(mono, cv2.COLOR_GRAY2BGR)
+            writer.write(np.ascontiguousarray(frame))
+            written += 1
+        if written < 1:
+            raise RuntimeError(say_error(lang, "too_few"))
+        return written, fps
     except Exception:
         writer.release()
-        capture.release()
-        shutil.rmtree(work, ignore_errors=True)
+        writer_open = False
         try:
             os.remove(dest)
         except OSError:
             pass
         raise
-    writer.release()
-    capture.release()
-    shutil.rmtree(work, ignore_errors=True)
-    if written < 1:
-        raise RuntimeError(say_error(lang, "too_few"))
-    return written, fps
+    finally:
+        if writer_open:
+            writer.release()
+        capture.release()
+        _drop_memmap(src)
+        _drop_memmap(dst)
+        src = None
+        dst = None
+        gc.collect()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def write_video(path: str, frames: np.ndarray, fps: float, progress=None, cancel=None, lang: str = "bg") -> None:
@@ -522,6 +619,133 @@ def _self_test() -> None:
     )
     assert produced == 20
     assert abs(produced_fps - 10) < 0.2
+
+    def disk_frames(video, clip_fps, mode, cut, lo, hi, amp, use_colors=False, max_band=2):
+        bench = tempfile.mkdtemp(prefix="temporal-fft-test-")
+        mapped_src = mapped_dst = None
+        try:
+            frames, frame_h, frame_w, _ = video.shape
+            mapped_src = np.memmap(
+                os.path.join(bench, "src.dat"), dtype=np.uint8, mode="w+", shape=video.shape
+            )
+            mapped_src[:] = video
+            mapped_src.flush()
+            out_count = frames
+            if mode == "spectrum":
+                out_count = int(_freq_index(frames, clip_fps, lo, hi).size)
+            mapped_dst = np.memmap(
+                os.path.join(bench, "dst.dat"),
+                dtype=np.uint8,
+                mode="w+",
+                shape=(out_count, frame_h, frame_w, 3),
+            )
+            _filter_stored(
+                mapped_src, mapped_dst, clip_fps, mode, cut, lo, hi, amp, use_colors, None, None, max_band
+            )
+            mapped_dst.flush()
+            return np.array(mapped_dst)
+        finally:
+            _drop_memmap(mapped_src)
+            _drop_memmap(mapped_dst)
+            gc.collect()
+            shutil.rmtree(bench, ignore_errors=True)
+
+    def same_as_ram(video, clip_fps, mode, cut, lo, hi, amp, use_colors=False):
+        ram = filter_clip(video.astype(np.float32), clip_fps, mode, cut, lo, hi, amp, use_colors)
+        disk = disk_frames(video, clip_fps, mode, cut, lo, hi, amp, use_colors, 2)
+        assert ram.shape == disk.shape, (mode, ram.shape, disk.shape)
+        delta = int(np.max(np.abs(ram.astype(np.int16) - disk.astype(np.int16))))
+        assert delta <= 2, (mode, use_colors, delta)
+
+    count = 32
+    fps = 16.0
+    wave = np.sin(2 * np.pi * 4 * np.arange(count) / count)
+    made = np.zeros((count, 8, 6, 3), np.float32)
+    level = np.zeros((8, 1, 1), np.float32)
+    level[:4] = 28
+    level[4:] = 4
+    made[:] = 128 + level * wave[:, None, None, None]
+    made += np.linspace(-6, 6, 6, dtype=np.float32)[None, None, :, None]
+    made = np.clip(np.rint(made), 0, 255).astype(np.uint8)
+    for mode, cut, lo, hi, amp, use_colors in (
+        ("highpass", 1.0, 0.0, 0.0, 2.0, False),
+        ("lowpass", 0.5, 0.0, 0.0, 1.0, False),
+        ("bandpass", 0.0, 1.0, 3.0, 2.0, False),
+        ("spectrum", 0.0, 0.0, 0.0, 1.0, False),
+        ("spectrum", 0.0, 0.0, 0.0, 2.0, False),
+        ("highpass", 1.0, 0.0, 0.0, 2.0, True),
+        ("bandpass", 0.0, 1.0, 3.0, 1.0, True),
+        ("spectrum", 0.0, 1.5, 2.5, 1.0, False),
+    ):
+        same_as_ram(made, fps, mode, cut, lo, hi, amp, use_colors)
+
+    band_freqs = np.fft.rfftfreq(count, d=1.0 / fps)
+    kept = int(np.count_nonzero((band_freqs >= 1.5) & (band_freqs <= 2.5)))
+    narrow = disk_frames(made, fps, "spectrum", 0.0, 1.5, 2.5, 1.0, False, 2)
+    assert narrow.shape[0] == kept and kept >= 1
+    assert int(_freq_index(count, fps, 10.0, 12.0)[0]) == int(np.argmin(np.abs(band_freqs - 11.0)))
+    assert disk_frames(made, fps, "spectrum", 0.0, 10.0, 12.0, 1.0).shape[0] == 1
+
+    ram = filter_clip(made.astype(np.float32), fps, "spectrum", 0, 0, 0, 1)
+    strips = np.concatenate(
+        [
+            filter_clip(made[:, top : top + 2].astype(np.float32), fps, "spectrum", 0, 0, 0, 1)
+            for top in range(0, made.shape[1], 2)
+        ],
+        axis=1,
+    )
+    assert int(np.max(np.abs(ram.astype(np.int16) - strips.astype(np.int16)))) > 2
+    assert int(ram[4, :4].max()) > int(ram[4, 4:].max()) + 20
+
+    still = np.full((32, 8, 8, 3), 90, np.uint8)
+    still = still.copy()
+    still[:, 0, 0, 0] = np.clip(90 + 15 * np.sin(2 * np.pi * np.arange(32) / 32), 0, 255).astype(np.uint8)
+    same_as_ram(still, 16.0, "spectrum", 0, 0, 0, 1)
+
+    rng = np.random.default_rng(0)
+    noise = rng.integers(0, 256, size=(24, 10, 8, 3), dtype=np.uint8)
+    for mode, cut, lo, hi, amp in (
+        ("highpass", 1.0, 0.0, 0.0, 2.0),
+        ("lowpass", 0.5, 0.0, 0.0, 1.0),
+        ("bandpass", 0.0, 1.0, 3.0, 1.0),
+        ("spectrum", 0.0, 0.0, 0.0, 1.0),
+    ):
+        same_as_ram(noise, 12.0, mode, cut, lo, hi, amp)
+
+    sooner, _ = chunk_plan(200, 270, 480, 3 * 1024**3)
+    assert sooner is True
+
+    spec_in = os.path.join(folder, "spec-in.mp4")
+    spec_out = os.path.join(folder, "spec-out.mp4")
+    write_video(spec_in, made, fps)
+    notes = []
+    produced, produced_fps = render_clip(
+        spec_in,
+        spec_out,
+        "spectrum",
+        0,
+        1.5,
+        2.5,
+        1,
+        None,
+        None,
+        progress=notes.append,
+    )
+    used = np.fft.rfftfreq(made.shape[0], d=1.0 / produced_fps)
+    expect_n = int(np.count_nonzero((used >= 1.5) & (used <= 2.5)))
+    assert 1 <= produced < made.shape[0] // 2 + 1
+    assert produced == expect_n
+    assert any(line.startswith("Чете ") for line in notes)
+    assert sum(line.startswith("Смята ред ") for line in notes) >= 2
+    reader = cv2.VideoCapture(spec_out)
+    seen_out = 0
+    while True:
+        ok, _frame = reader.read()
+        if not ok:
+            break
+        seen_out += 1
+    reader.release()
+    assert seen_out == produced
     print("temporal tests: ok")
 
 
