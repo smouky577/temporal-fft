@@ -14,7 +14,7 @@
 
 ## Windows
 
-Свали **Temporal-FFT-Windows-1.6.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
+Свали **Temporal-FFT-Windows-1.8.zip** от [Releases](https://github.com/smouky577/temporal-fft/releases). Цъкни върху името на zip файла. Той се сваля цял.
 
 Не отваряй `temporal_app.py` и `temporal.py` в сайта и не копирай текста в нов файл. Така файловете само се показват, не се свалят.
 
@@ -67,7 +67,7 @@ The phone scales the clip to 480 px and processes the first 10 seconds. If the f
 
 ## Windows
 
-Download **Temporal-FFT-Windows-1.6.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
+Download **Temporal-FFT-Windows-1.8.zip** from [Releases](https://github.com/smouky577/temporal-fft/releases). Click the zip file name. The whole archive downloads.
 
 Do not open `temporal_app.py` or `temporal.py` on the site and do not paste them into a new file. That only shows the text.
 
