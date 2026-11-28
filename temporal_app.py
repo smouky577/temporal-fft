@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageTk
 
 from temporal import Stopped, _progress_line, clip_needs_chunks, filter_clip, load_frames, render_clip, write_video
 
@@ -132,33 +132,6 @@ UI = {
         "stopped": "Stopped.",
     },
 }
-
-
-def paint_flag(kind: str) -> Image.Image:
-    """Small flag for the language currently on screen."""
-    width, height = 48, 30
-    if kind == "bg":
-        image = Image.new("RGB", (width, height), (255, 255, 255))
-        draw = ImageDraw.Draw(image)
-        stripe = height // 3
-        draw.rectangle((0, stripe, width, stripe * 2), fill=(0, 150, 110))
-        draw.rectangle((0, stripe * 2, width, height), fill=(214, 38, 18))
-    else:
-        image = Image.new("RGB", (width, height), (1, 33, 105))
-        draw = ImageDraw.Draw(image)
-        white = (255, 255, 255)
-        red = (200, 16, 46)
-        draw.line((0, 0, width, height), fill=white, width=8)
-        draw.line((0, height, width, 0), fill=white, width=8)
-        draw.line((0, 0, width, height), fill=red, width=3)
-        draw.line((0, height, width, 0), fill=red, width=3)
-        draw.rectangle((width // 2 - 6, 0, width // 2 + 6, height), fill=white)
-        draw.rectangle((0, height // 2 - 5, width, height // 2 + 5), fill=white)
-        draw.rectangle((width // 2 - 3, 0, width // 2 + 3, height), fill=red)
-        draw.rectangle((0, height // 2 - 2, width, height // 2 + 2), fill=red)
-    framed = Image.new("RGB", (width + 2, height + 2), LINE)
-    framed.paste(image, (1, 1))
-    return framed
 
 
 def enable_dpi_awareness() -> None:
@@ -287,7 +260,6 @@ class TemporalApp:
         self.colors = tk.BooleanVar(value=False)
         self.lang = "bg"
         self.clip_info = None
-        self._flag_image = None
         self._ready = False
 
         self._build()
@@ -327,8 +299,10 @@ class TemporalApp:
             font=("Segoe UI", 9),
         )
         self.hint.pack(side="left", padx=(16, 0), pady=(8, 0))
+        mark = tk.Frame(header, bg=BG)
+        mark.pack(side="right", anchor="e")
         credit = tk.Label(
-            header,
+            mark,
             text="by Dr. Baysinger",
             bg=BG,
             fg=MUTED,
@@ -337,9 +311,12 @@ class TemporalApp:
         )
         credit.pack(side="right")
         credit.bind("<Button-1>", lambda _event: show_about(self.root))
-        self.flag_btn = tk.Label(header, bg=BG, cursor="hand2", bd=0)
-        self.flag_btn.pack(side="right", padx=(0, 12))
-        self.flag_btn.bind("<Button-1>", lambda _event: self._toggle_language())
+        self.flag = tk.Canvas(
+            mark, width=28, height=18, highlightthickness=0, bd=0, cursor="hand2", bg=BG,
+        )
+        self.flag.pack(side="left", padx=(0, 8))
+        self.flag.bind("<Button-1>", lambda _event: self._toggle_language())
+        self.draw_flag()
 
         rule = tk.Frame(self.root, bg=ACCENT, height=2)
         rule.grid(row=2, column=0, sticky="ew", padx=18, pady=(8, 0))
@@ -517,10 +494,24 @@ class TemporalApp:
         self.lang = "en" if self.lang == "bg" else "bg"
         self._apply_language()
 
-    def _show_flag(self) -> None:
-        kind = "bg" if self.lang == "bg" else "uk"
-        self._flag_image = ImageTk.PhotoImage(paint_flag(kind))
-        self.flag_btn.configure(image=self._flag_image)
+    def draw_flag(self) -> None:
+        canvas = self.flag
+        canvas.delete("all")
+        width, height = 28, 18
+        if self.lang != "en":
+            canvas.create_rectangle(0, 0, width, height / 3, fill="#ffffff", width=0)
+            canvas.create_rectangle(0, height / 3, width, height * 2 / 3, fill="#00966E", width=0)
+            canvas.create_rectangle(0, height * 2 / 3, width, height, fill="#D62612", width=0)
+            return
+        canvas.create_rectangle(0, 0, width, height, fill="#012169", width=0)
+        canvas.create_line(0, 0, width, height, fill="#ffffff", width=5)
+        canvas.create_line(width, 0, 0, height, fill="#ffffff", width=5)
+        canvas.create_line(0, 2, width, height + 2, fill="#C8102E", width=2)
+        canvas.create_line(width, 2, 0, height + 2, fill="#C8102E", width=2)
+        canvas.create_rectangle(width / 2 - 3, 0, width / 2 + 3, height, fill="#ffffff", width=0)
+        canvas.create_rectangle(0, height / 2 - 2.5, width, height / 2 + 2.5, fill="#ffffff", width=0)
+        canvas.create_rectangle(width / 2 - 1.6, 0, width / 2 + 1.6, height, fill="#C8102E", width=0)
+        canvas.create_rectangle(0, height / 2 - 1.2, width, height / 2 + 1.2, fill="#C8102E", width=0)
 
     def _apply_language(self) -> None:
         self.hint.configure(text=self.t("hint"))
@@ -537,7 +528,7 @@ class TemporalApp:
         self.width_caption.configure(text=self.t("width"))
         self.seconds_caption.configure(text=self.t("length"))
         self._paint_size()
-        self._show_flag()
+        self.draw_flag()
         self._paint_toggles()
         self._paint_play()
         if self.clip_info:
@@ -1012,10 +1003,17 @@ def main() -> None:
         assert app.mode_buttons["highpass"].cget("text") == "Бързи"
         order = [widget.cget("text") for widget in app.gray_btn.master.pack_slaves()]
         assert order == ["Бързи", "Бавни", "Лента", "Спектър", "Размер", "Черно-бяло", "Цветове", "Оригинал", "Цял клип"]
-        assert app.flag_btn.cget("image")
+        mark = app.flag.master
+        assert mark.pack_info()["side"] == "right"
+        assert app.flag.pack_info()["side"] == "left"
+        credit = next(widget for widget in mark.winfo_children() if widget is not app.flag)
+        assert credit.cget("text") == "by Dr. Baysinger"
+        assert credit.pack_info()["side"] == "right"
+        assert len(app.flag.find_all()) == 3
         app._toggle_language()
         app.root.update()
         assert app.lang == "en"
+        assert len(app.flag.find_all()) > 3
         assert app.mode_buttons["highpass"].cget("text") == "Fast"
         assert app.fit_btn.cget("text") == "Size"
         assert app.gray_btn.cget("text") == "Black & white"
